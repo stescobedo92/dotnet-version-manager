@@ -70,6 +70,12 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
+      - name: Prepare assets for upload
+        run: |
+          mkdir release_assets
+          find artifacts -type f -exec cp {} release_assets/ \;
+          ls -R release_assets
+
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,6 +85,9 @@ jobs:
             --title "Release v${{ env.VERSION }}" \
             --notes "$release_notes"
           
-          for asset in artifacts/*; do
-            gh release upload v${{ env.VERSION }} "$asset" --clobber
+          for asset in release_assets/*; do
+            if [ -f "$asset" ]; then
+              echo "Uploading $asset"
+              gh release upload v${{ env.VERSION }} "$asset" --clobber
+            fi
           done
