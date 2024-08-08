@@ -64,15 +64,21 @@ jobs:
 
       - name: Download all artifacts
         uses: actions/download-artifact@v2
+        with:
+          path: artifacts
 
       - name: Display structure of downloaded files
-        run: ls -R
+        run: ls -R artifacts
 
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          release_notes="Release v${{ env.VERSION }}"
           gh release create v${{ env.VERSION }} \
             --title "Release v${{ env.VERSION }}" \
-            --notes "Release v${{ env.VERSION }}" \
-            dver-*
+            --notes "$release_notes"
+          
+          for asset in artifacts/*; do
+            gh release upload v${{ env.VERSION }} "$asset" --clobber
+          done
