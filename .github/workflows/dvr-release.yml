@@ -50,6 +50,8 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -58,18 +60,7 @@ jobs:
         id: get_version
         run: |
           version=$(grep '^version =' Cargo.toml | sed 's/.*= *"//' | sed 's/".*//')
-          echo "::set-output name=version::$version"
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ steps.get_version.outputs.version }}
-          release_name: Release v${{ steps.get_version.outputs.version }}
-          draft: false
-          prerelease: false
+          echo "VERSION=$version" >> $GITHUB_ENV
 
       - name: Download all artifacts
         uses: actions/download-artifact@v2
@@ -77,15 +68,11 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R
 
-      - name: Upload Release Assets
+      - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for asset in dver-*; do
-            echo "Uploading $asset..."
-            curl --fail \
-                 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                 -H "Content-Type: application/octet-stream" \
-                 --data-binary @"$asset" \
-                 "${{ steps.create_release.outputs.upload_url }}?name=$(basename $asset)"
-          done
+          gh release create v${{ env.VERSION }} \
+            --title "Release v${{ env.VERSION }}" \
+            --notes "Release v${{ env.VERSION }}" \
+            dver-*
