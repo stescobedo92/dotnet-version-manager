@@ -76,13 +76,16 @@ jobs:
           find artifacts -type f -exec cp {} release_assets/ \;
           ls -R release_assets
 
+      - name: Create source code archive
+        run: git archive --format=zip HEAD -o source-code.zip
+
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_notes="dver v${{ env.VERSION }}"
+          release_notes="dver-v${{ env.VERSION }}"
           gh release create v${{ env.VERSION }} \
-            --title "dver v${{ env.VERSION }}" \
+            --title "dver-v${{ env.VERSION }}" \
             --notes "$release_notes" \
             --generate-notes
 
@@ -95,4 +98,5 @@ jobs:
           done
 
           # Upload source code
-          gh release upload v${{ env.VERSION }} $(git archive --format=zip HEAD -o source-code.zip) --clobber
+          echo "Uploading source code"
+          gh release upload v${{ env.VERSION }} source-code.zip --clobber
