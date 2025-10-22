@@ -7,9 +7,11 @@
 - **`current`**: Check the currently active .NET SDK version.
 - **`list`**: View all installed .NET SDK versions.
 - **`use`**: Switch to a different .NET SDK version for your project by creating a `global.json` file.
-- **`install`**: Install new .NET SDK versions, including LTS, specific versions, or versions from a specific channel.
+- **`install`**: Install new .NET SDK versions, including LTS, specific versions, or versions from a specific channel, runtime, or architecture.
 - **`uninstall`**: Remove specific .NET SDK versions.
 - **`doctor`**: Check your system for common configuration issues.
+- **`which`**: Display the installation path for the SDK versions managed by `dver`.
+- **`remote`**: Inspect Microsoft's published release channels and their latest SDK/runtime versions.
 
 ## Why It Matters
 
@@ -50,6 +52,18 @@ Install the latest Long-Term Support (LTS) version.
 dver install --lts
 ```
 
+Install from a specific channel (for example, the latest 9.0 preview builds).
+
+```bash
+dver install --channel 9.0 --architecture arm64
+```
+
+Install only the runtime components (no SDK) to a custom directory.
+
+```bash
+dver install --runtime aspnetcore --install-path /opt/dotnet
+```
+
 By default, `dver` installs SDKs to the standard user-level location (`~/.dotnet` on Linux/macOS, `%LOCALAPPDATA%\Microsoft\dotnet` on Windows).
 
 ### `list`
@@ -67,6 +81,14 @@ Set the .NET SDK version for the current directory by creating a `global.json` f
 ```bash
 dver use 8.0.406
 ```
+
+You can also tweak the `global.json` content via optional flags:
+
+```bash
+dver use 8.0.406 --roll-forward latestMinor --allow-prerelease
+```
+
+To write the file to a different directory, pass the `--path` option pointing to a folder or file path.
 
 ### `uninstall`
 
@@ -88,6 +110,16 @@ Uninstall all installed .NET SDKs.
 dver uninstall --all
 ```
 
+### `which`
+
+Display where the SDK versions are installed.
+
+```bash
+dver which 8
+```
+
+Omit the version to show every installed SDK path.
+
 ### `current`
 
 Display the currently active .NET SDK version.
@@ -103,3 +135,13 @@ Run checks to diagnose common issues with your environment.
 ```bash
 dver doctor
 ```
+
+### `remote`
+
+Review Microsoft's published release channels and optionally inspect recent releases.
+
+```bash
+dver remote --include-preview --show-releases 3
+```
+
+Use `--channel` to filter a specific channel (e.g., `dver remote --channel 8.0`).
