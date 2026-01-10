@@ -22,8 +22,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Current dotnet version: {}", version.trim());
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("Failed to get current dotnet version{}{}",
-                          if stderr.trim().is_empty() { "" } else { ": " }, stderr.trim());
+                
+                // Check if the error is about SDK not found due to global.json
+                if stderr.contains("SDK was not found") || stderr.contains("Requested SDK version") {
+                    eprintln!("Error: The .NET SDK version specified in global.json is not installed.");
+                    eprintln!();
+                    
+                    // Try to find which global.json is being used
+                    if let Ok(current) = std::env::current_dir() {
+                        let mut check_dir = Some(current.as_path());
+                        while let Some(dir) = check_dir {
+                            let global_json_path = dir.join("global.json");
+                            if global_json_path.exists() {
+                                eprintln!("Found global.json at: {:?}", global_json_path);
+                                if let Ok(content) = std::fs::read_to_string(&global_json_path) {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                        if let Some(version) = json.get("sdk").and_then(|s| s.get("version")).and_then(|v| v.as_str()) {
+                                            eprintln!("Requested SDK version: {}", version);
+                                            eprintln!();
+                                            eprintln!("You can either:");
+                                            eprintln!("  1. Install the requested version:");
+                                            eprintln!("     dver install --version {}", version);
+                                            eprintln!("  2. Change to an installed version:");
+                                            eprintln!("     dver use <installed-version>");
+                                            eprintln!("     Run 'dver list' to see installed versions");
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            check_dir = dir.parent();
+                        }
+                    }
+                } else {
+                    eprintln!("Failed to get current dotnet version{}{}",
+                              if stderr.trim().is_empty() { "" } else { ": " }, stderr.trim());
+                }
             }
         }
         Commands::List => {
@@ -64,6 +98,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Use { version } => {
+            // First, validate that the requested version is installed
+            use crate::utils::sdk::list_installed_sdks_grouped;
+            
+            let sdks_by_location = list_installed_sdks_grouped()?;
+            let mut found_version = false;
+            let mut installed_versions = Vec::new();
+            
+            for sdks in sdks_by_location.values() {
+                for sdk in sdks {
+                    installed_versions.push(sdk.version.clone());
+                    if sdk.version == *version {
+                        found_version = true;
+                    }
+                }
+            }
+            
+            if !found_version {
+                eprintln!("Error: .NET SDK version {} is not installed.", version);
+                eprintln!("\nInstalled SDK versions:");
+                for sdks in sdks_by_location.values() {
+                    for sdk in sdks {
+                        eprintln!("  {}", sdk.version);
+                    }
+                }
+                eprintln!("\nPlease install the SDK version first using:");
+                eprintln!("  dver install --version {}", version);
+                return Err("Requested SDK version is not installed".into());
+            }
+            
             let json_data = json!({
                 "sdk": {
                     "version": version
