@@ -51,15 +51,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Write to current working directory to follow common dotnet practice
             let file_path = std::env::current_dir()?.join("global.json");
 
-            // If a file exists, keep a simple backup alongside
+            // Check if there's already a global.json in parent directories
+            let mut found_parent_config = false;
+            if let Ok(current) = std::env::current_dir() {
+                let mut check_dir = current.parent();
+                while let Some(dir) = check_dir {
+                    let parent_global = dir.join("global.json");
+                    if parent_global.exists() {
+                        println!("Note: Found global.json in parent directory: {:?}", parent_global);
+                        println!("      The new global.json in the current directory will take precedence.");
+                        found_parent_config = true;
+                        break;
+                    }
+                    check_dir = dir.parent();
+                }
+            }
+
+            // If a file exists in current directory, keep a backup
             if file_path.exists() {
                 let backup = file_path.with_extension("json.bak");
                 let _ = std::fs::copy(&file_path, &backup);
+                println!("Previous global.json backed up to: {:?}", backup);
             }
 
             let file = File::create(&file_path)?;
             serde_json::to_writer_pretty(file, &json_data)?;
             println!("SDK version set to {} in {:?}", version, file_path);
+            
+            if !found_parent_config {
+                println!("\nThis global.json will be used by .NET SDK for this directory and all subdirectories.");
+                println!("The SDK searches upward from the current directory until it finds a global.json file.");
+            }
         }
         Commands::Install { lts, version, install_path } => {
             commands::install::handle_install(*lts, version.clone(), install_path.clone()).await?;

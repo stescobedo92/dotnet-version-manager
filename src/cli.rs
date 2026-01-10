@@ -14,7 +14,10 @@ pub enum Commands {
     /// List available SDK versions
     List,
     /// Set SDK version
-    Use { version: String },
+    Use { 
+        /// SDK version to set (e.g., 8.0.100)
+        version: String 
+    },
     /// Check if dotnet is installed and install if not
     Install {
         /// Install LTS version
