@@ -117,7 +117,7 @@ fn prompt_user_selection(matches: &[(String, PathBuf)]) -> Result<usize, Box<dyn
     io::stdin().read_line(&mut input)?;
     
     let selection: usize = input.trim().parse()
-        .map_err(|_| "Invalid selection")?;
+        .map_err(|_| "Invalid input: please enter a number")?;
     
     if selection < 1 || selection > matches.len() {
         return Err("Selection out of range".into());
@@ -416,11 +416,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            if needs_sudo && !cfg!(windows) {
-                eprintln!("\nWarning: Some SDK installations require elevated privileges to remove.");
-                eprintln!("You may need to run this command with 'sudo' or as administrator.");
-                eprintln!("Example: sudo dver uninstall {}\n", 
-                    targets.first().map(|(v, _)| v.as_str()).unwrap_or("VERSION"));
+            if needs_sudo {
+                if cfg!(windows) {
+                    eprintln!("\nWarning: Some SDK installations may require elevated privileges to remove.");
+                    eprintln!("If removal fails, try running this command as Administrator.\n");
+                } else {
+                    eprintln!("\nWarning: Some SDK installations require elevated privileges to remove.");
+                    eprintln!("You may need to run this command with 'sudo'.");
+                    eprintln!("Example: sudo dver uninstall {}\n", 
+                        targets.first().map(|(v, _)| v.as_str()).unwrap_or("VERSION"));
+                }
             }
 
             for (ver, path) in targets {
@@ -441,7 +446,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if cfg!(windows) {
                                     eprintln!("  → Try running this command as Administrator.");
                                 } else {
-                                    eprintln!("  → Try running: sudo dver uninstall --version {}", ver);
+                                    eprintln!("  → Try running: sudo dver uninstall {}", ver);
                                 }
                             }
                         }
