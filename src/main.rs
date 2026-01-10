@@ -70,39 +70,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            // Write to current working directory to follow common dotnet practice
-            let file_path = std::env::current_dir()?.join("global.json");
+            // Priority 1: Check if global.json exists in HOME directory and update it there
+            let home_dir = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok()
+                .and_then(|h| std::path::PathBuf::from(h).canonicalize().ok());
 
-            // Check if there's already a global.json in parent directories
-            let mut found_parent_config = false;
-            if let Ok(current) = std::env::current_dir() {
-                let mut check_dir = current.parent();
-                while let Some(dir) = check_dir {
-                    let parent_global = dir.join("global.json");
-                    if parent_global.exists() {
-                        println!("Note: Found global.json in parent directory: {:?}", parent_global);
-                        println!("      The new global.json in the current directory will take precedence.");
-                        found_parent_config = true;
-                        break;
-                    }
-                    check_dir = dir.parent();
+            let mut file_path = std::env::current_dir()?.join("global.json");
+            let mut updated_home = false;
+
+            if let Some(home) = home_dir {
+                let home_global = home.join("global.json");
+                if home_global.exists() {
+                    // Update existing global.json in HOME
+                    let backup = home_global.with_extension("json.bak");
+                    let _ = std::fs::copy(&home_global, &backup);
+                    
+                    let file = File::create(&home_global)?;
+                    serde_json::to_writer_pretty(file, &json_data)?;
+                    println!("Updated existing global.json in HOME directory: {:?}", home_global);
+                    println!("SDK version set to {}", version);
+                    updated_home = true;
+                    file_path = home_global;
                 }
             }
 
-            // If a file exists in current directory, keep a backup
-            if file_path.exists() {
-                let backup = file_path.with_extension("json.bak");
-                let _ = std::fs::copy(&file_path, &backup);
-                println!("Previous global.json backed up to: {:?}", backup);
-            }
+            // Priority 2: If no global.json in HOME, check current directory and parents
+            if !updated_home {
+                // Check if there's already a global.json in parent directories
+                let mut found_parent_config = false;
+                if let Ok(current) = std::env::current_dir() {
+                    let mut check_dir = current.parent();
+                    while let Some(dir) = check_dir {
+                        let parent_global = dir.join("global.json");
+                        if parent_global.exists() {
+                            println!("Note: Found global.json in parent directory: {:?}", parent_global);
+                            println!("      The new global.json in the current directory will take precedence.");
+                            found_parent_config = true;
+                            break;
+                        }
+                        check_dir = dir.parent();
+                    }
+                }
 
-            let file = File::create(&file_path)?;
-            serde_json::to_writer_pretty(file, &json_data)?;
-            println!("SDK version set to {} in {:?}", version, file_path);
-            
-            if !found_parent_config {
-                println!("\nThis global.json will be used by .NET SDK for this directory and all subdirectories.");
-                println!("The SDK searches upward from the current directory until it finds a global.json file.");
+                // If a file exists in current directory, keep a backup
+                if file_path.exists() {
+                    let backup = file_path.with_extension("json.bak");
+                    let _ = std::fs::copy(&file_path, &backup);
+                    println!("Previous global.json backed up to: {:?}", backup);
+                }
+
+                let file = File::create(&file_path)?;
+                serde_json::to_writer_pretty(file, &json_data)?;
+                println!("SDK version set to {} in {:?}", version, file_path);
+                
+                if !found_parent_config {
+                    println!("\nThis global.json will be used by .NET SDK for this directory and all subdirectories.");
+                    println!("The SDK searches upward from the current directory until it finds a global.json file.");
+                }
             }
         }
         Commands::Install { lts, version, install_path } => {
