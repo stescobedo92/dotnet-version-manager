@@ -19,7 +19,8 @@ pub fn run_doctor_checks() {
     if let Some(home_dir) = get_home_dir() {
         let dotnet_dir = home_dir.join(".dotnet");
         if let Ok(path_var) = std::env::var("PATH") {
-            if path_var.split(':').any(|p| Path::new(p) == dotnet_dir) {
+            let path_separator = if cfg!(windows) { ';' } else { ':' };
+            if path_var.split(path_separator).any(|p| Path::new(p) == dotnet_dir) {
                 println!("✅ .NET SDK installation directory is in your PATH.");
             } else {
                 println!("⚠️ .NET SDK installation directory (~/.dotnet) might not be in your PATH.");
