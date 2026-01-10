@@ -71,7 +71,7 @@ fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::E
     for line in stdout.lines() {
         // Expected format: "8.0.406 [C:\\Program Files\\dotnet\\sdk]"
         if let Some((ver_part, path_part)) = line.split_once('[') {
-            let version = ver_part.trim().split_whitespace().next().unwrap_or("").to_string();
+            let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
             let base = path_part.trim().trim_end_matches(']').trim();
             if version.is_empty() || base.is_empty() { continue; }
             let mut pb = PathBuf::from(base);
