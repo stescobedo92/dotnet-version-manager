@@ -31,14 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             match list_installed_sdks() {
                 Ok(sdks) => {
-                    let mut versions: Vec<String> = sdks
-                        .into_iter()
-                        .map(|(version, _)| version)
-                        .collect();
-                    // Already sorted by list_installed_sdks, but dedup to be safe
-                    versions.dedup();
-                    for v in versions {
-                        println!("{}", v);
+                    // list_installed_sdks already returns deduplicated and sorted versions
+                    for (version, _) in sdks {
+                        println!("{}", version);
                     }
                 }
                 Err(e) => {

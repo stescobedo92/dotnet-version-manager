@@ -103,10 +103,20 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
     
     // Sort by version for consistent output
     sdks.sort_by(|a, b| {
-        // Try to parse as version numbers for proper sorting
+        // Parse version components for proper semantic versioning comparison
         let a_parts: Vec<u32> = a.0.split('.').filter_map(|s| s.parse().ok()).collect();
         let b_parts: Vec<u32> = b.0.split('.').filter_map(|s| s.parse().ok()).collect();
-        a_parts.cmp(&b_parts)
+        
+        // Compare each segment, treating missing segments as 0
+        for i in 0..a_parts.len().max(b_parts.len()) {
+            let a_val = a_parts.get(i).copied().unwrap_or(0);
+            let b_val = b_parts.get(i).copied().unwrap_or(0);
+            match a_val.cmp(&b_val) {
+                std::cmp::Ordering::Equal => continue,
+                other => return other,
+            }
+        }
+        std::cmp::Ordering::Equal
     });
     
     Ok(sdks)
