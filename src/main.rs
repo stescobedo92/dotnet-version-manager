@@ -82,6 +82,11 @@ fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::E
     Ok(sdks)
 }
 
+fn is_sdk_version_installed(version: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let sdks = list_installed_sdks()?;
+    Ok(sdks.iter().any(|(v, _)| v == version))
+}
+
 async fn download_install_script() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let script_url = if cfg!(windows) {
         "https://dotnet.microsoft.com/download/dotnet/scripts/v1/dotnet-install.ps1"
@@ -255,21 +260,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("SDK version set to {} in {:?}", version, file_path);
         }
         Commands::Install { lts, version, install_path } => {
-            if is_dotnet_installed() {
-                println!("dotnet is already installed on your system.");
-                let output = Command::new("dotnet")
-                    .arg("--version")
-                    .output()?;
-                let version = String::from_utf8_lossy(&output.stdout);
-                println!("Current version: {}", version.trim());
-            } else {
-                println!("dotnet is not installed. Installing now...");
-                if let Err(e) = install_dotnet(*lts, version.clone(), install_path.clone()).await {
-                    eprintln!("Installation failed: {}", e);
-                    return Err(e);
+            // Check if a specific version is requested and if it's already installed
+            if let Some(ref v) = version {
+                // Only check if dotnet is available before trying to list SDKs
+                if is_dotnet_installed() {
+                    match is_sdk_version_installed(v) {
+                        Ok(true) => {
+                            println!(".NET SDK version {} is already installed.", v);
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            println!("Installing .NET SDK version {}...", v);
+                        }
+                        Err(_) => {
+                            // If we can't check, proceed with installation attempt
+                            println!("Installing .NET SDK version {}...", v);
+                        }
+                    }
+                } else {
+                    println!("Installing .NET SDK version {}...", v);
                 }
-                println!("dotnet installation completed.");
+            } else if *lts {
+                println!("Installing latest LTS .NET SDK...");
+            } else {
+                println!("Installing .NET SDK...");
             }
+
+            // Proceed with installation
+            if let Err(e) = install_dotnet(*lts, version.clone(), install_path.clone()).await {
+                eprintln!("Installation failed: {}", e);
+                return Err(e);
+            }
+            println!("dotnet installation completed successfully.");
         }
         Commands::Uninstall { version, all } => {
             let sdks = list_installed_sdks()?;
