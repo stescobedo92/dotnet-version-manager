@@ -97,28 +97,48 @@ async fn install_dotnet(lts: bool, version: Option<String>, install_path: Option
 }
 
 pub async fn handle_install(lts: bool, version: Option<String>, install_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::utils::sdk::{is_dotnet_installed, find_matching_versions};
+    use crate::utils::sdk::{is_dotnet_installed, list_installed_sdks_grouped};
     
     // Check if a specific version is requested and if it's already installed
     if let Some(ref v) = version {
-        // Only check if dotnet is available before trying to list SDKs
+        // Check all locations for the requested version
         if is_dotnet_installed() {
-            match find_matching_versions(v) {
-                Ok(matches) if !matches.is_empty() => {
-                    if matches.len() == 1 {
-                        println!(".NET SDK version {} is already installed.", matches[0].0);
+            match list_installed_sdks_grouped() {
+                Ok(sdks_by_location) => {
+                    let mut found_locations = Vec::new();
+                    let mut matching_versions = Vec::new();
+                    
+                    for (location, sdks) in &sdks_by_location {
+                        for sdk in sdks {
+                            if sdk.version == *v {
+                                found_locations.push(location.clone());
+                            } else if sdk.version.starts_with(v) {
+                                matching_versions.push(sdk.version.clone());
+                            }
+                        }
+                    }
+                    
+                    // Exact match found
+                    if !found_locations.is_empty() {
+                        println!(".NET SDK version {} is already installed in the following location(s):", v);
+                        for loc in &found_locations {
+                            println!("  - {}", loc);
+                        }
                         return Ok(());
-                    } else {
-                        // Multiple matches found
+                    }
+                    
+                    // Partial matches found
+                    if !matching_versions.is_empty() {
+                        matching_versions.sort();
+                        matching_versions.dedup();
                         println!("Multiple versions match '{}' and are already installed:", v);
-                        for (ver, _) in &matches {
+                        for ver in &matching_versions {
                             println!("  - {}", ver);
                         }
                         println!("\nPlease specify the exact version to install, or all listed versions are already installed.");
                         return Ok(());
                     }
-                }
-                Ok(_) => {
+                    
                     // No matches, proceed with installation
                     println!("Installing .NET SDK version {}...", v);
                 }

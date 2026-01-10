@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::io::{self, Write};
+use std::collections::HashMap;
 
 pub fn is_dotnet_installed() -> bool {
     Command::new("dotnet")
@@ -10,12 +11,16 @@ pub fn is_dotnet_installed() -> bool {
         .unwrap_or(false)
 }
 
-pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
-    use std::collections::HashSet;
+#[derive(Debug, Clone)]
+pub struct SdkLocation {
+    pub version: String,
+    pub path: PathBuf,
+}
+
+pub fn list_installed_sdks_grouped() -> Result<HashMap<String, Vec<SdkLocation>>, Box<dyn std::error::Error>> {
     use crate::utils::common::get_home_dir;
     
-    let mut sdks = Vec::new();
-    let mut seen_versions = HashSet::new();
+    let mut sdks_by_location: HashMap<String, Vec<SdkLocation>> = HashMap::new();
     
     // First, check system dotnet
     if let Ok(output) = Command::new("dotnet").args(["--list-sdks"]).output() {
@@ -27,11 +32,15 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
                     let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
                     let base = path_part.trim().trim_end_matches(']').trim();
                     if version.is_empty() || base.is_empty() { continue; }
+                    
                     let mut pb = PathBuf::from(base);
                     pb.push(&version);
-                    if seen_versions.insert(version.clone()) {
-                        sdks.push((version, pb));
-                    }
+                    
+                    let location_key = base.to_string();
+                    sdks_by_location.entry(location_key.clone()).or_default().push(SdkLocation {
+                        version,
+                        path: pb,
+                    });
                 }
             }
         }
@@ -61,12 +70,15 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
                             let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
                             let base = path_part.trim().trim_end_matches(']').trim();
                             if version.is_empty() || base.is_empty() { continue; }
+                            
                             let mut pb = PathBuf::from(base);
                             pb.push(&version);
-                            // Only add if we haven't seen this version yet
-                            if seen_versions.insert(version.clone()) {
-                                sdks.push((version, pb));
-                            }
+                            
+                            let location_key = base.to_string();
+                            sdks_by_location.entry(location_key.clone()).or_default().push(SdkLocation {
+                                version,
+                                path: pb,
+                            });
                         }
                     }
                 }
@@ -86,13 +98,22 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
         
         if user_sdk_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&user_sdk_dir) {
+                let location_key = user_sdk_dir.display().to_string();
                 for entry in entries.flatten() {
                     if entry.path().is_dir() {
                         if let Some(version_name) = entry.file_name().to_str() {
                             let version = version_name.to_string();
-                            // Only add if we haven't seen this version yet
-                            if seen_versions.insert(version.clone()) {
-                                sdks.push((version, entry.path()));
+                            // Check if this version is already listed for this location
+                            let already_exists = sdks_by_location
+                                .get(&location_key)
+                                .map(|sdks| sdks.iter().any(|sdk| sdk.version == version))
+                                .unwrap_or(false);
+                            
+                            if !already_exists {
+                                sdks_by_location.entry(location_key.clone()).or_default().push(SdkLocation {
+                                    version,
+                                    path: entry.path(),
+                                });
                             }
                         }
                     }
@@ -101,13 +122,42 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
         }
     }
     
-    // Sort by version for consistent output
-    sdks.sort_by(|a, b| {
-        // Parse version components for proper semantic versioning comparison
+    // Sort versions within each location
+    for sdks in sdks_by_location.values_mut() {
+        sdks.sort_by(|a, b| {
+            let a_parts: Vec<u32> = a.version.split('.').filter_map(|s| s.parse().ok()).collect();
+            let b_parts: Vec<u32> = b.version.split('.').filter_map(|s| s.parse().ok()).collect();
+            
+            for i in 0..a_parts.len().max(b_parts.len()) {
+                let a_val = a_parts.get(i).copied().unwrap_or(0);
+                let b_val = b_parts.get(i).copied().unwrap_or(0);
+                match a_val.cmp(&b_val) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+    
+    Ok(sdks_by_location)
+}
+
+pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
+    let grouped = list_installed_sdks_grouped()?;
+    let mut all_sdks = Vec::new();
+    
+    for sdks in grouped.values() {
+        for sdk in sdks {
+            all_sdks.push((sdk.version.clone(), sdk.path.clone()));
+        }
+    }
+    
+    // Sort by version
+    all_sdks.sort_by(|a, b| {
         let a_parts: Vec<u32> = a.0.split('.').filter_map(|s| s.parse().ok()).collect();
         let b_parts: Vec<u32> = b.0.split('.').filter_map(|s| s.parse().ok()).collect();
         
-        // Compare each segment, treating missing segments as 0
         for i in 0..a_parts.len().max(b_parts.len()) {
             let a_val = a_parts.get(i).copied().unwrap_or(0);
             let b_val = b_parts.get(i).copied().unwrap_or(0);
@@ -119,8 +169,13 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
         std::cmp::Ordering::Equal
     });
     
-    Ok(sdks)
+    // Deduplicate by version (keep first occurrence)
+    let mut seen = std::collections::HashSet::new();
+    all_sdks.retain(|(v, _)| seen.insert(v.clone()));
+    
+    Ok(all_sdks)
 }
+
 
 pub fn find_matching_versions(pattern: &str) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
     let sdks = list_installed_sdks()?;

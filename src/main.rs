@@ -27,13 +27,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::List => {
-            use crate::utils::sdk::list_installed_sdks;
+            use crate::utils::sdk::list_installed_sdks_grouped;
             
-            match list_installed_sdks() {
-                Ok(sdks) => {
-                    // list_installed_sdks already returns deduplicated and sorted versions
-                    for (version, _) in sdks {
-                        println!("{}", version);
+            match list_installed_sdks_grouped() {
+                Ok(sdks_by_location) => {
+                    if sdks_by_location.is_empty() {
+                        println!("No .NET SDK versions found.");
+                        return Ok(());
+                    }
+                    
+                    // Sort locations: system paths first, then user paths
+                    let mut locations: Vec<_> = sdks_by_location.keys().collect();
+                    locations.sort_by(|a, b| {
+                        // System paths (Program Files, /usr/share) should come first
+                        let a_is_system = a.contains("Program Files") || a.contains("/usr/share");
+                        let b_is_system = b.contains("Program Files") || b.contains("/usr/share");
+                        match (a_is_system, b_is_system) {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => a.cmp(b),
+                        }
+                    });
+                    
+                    for location in locations {
+                        if let Some(sdks) = sdks_by_location.get(location) {
+                            println!("\nVersions found in [{}]", location);
+                            for sdk in sdks {
+                                println!("  {}", sdk.version);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
