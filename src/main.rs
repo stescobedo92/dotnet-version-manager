@@ -272,8 +272,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(false) => {
                             println!("Installing .NET SDK version {}...", v);
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // If we can't check, proceed with installation attempt
+                            eprintln!("Warning: Could not verify if SDK version is already installed: {}", e);
                             println!("Installing .NET SDK version {}...", v);
                         }
                     }
