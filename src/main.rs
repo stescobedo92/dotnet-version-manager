@@ -27,22 +27,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::List => {
-            let output = Command::new("dotnet")
-                .args(["--list-sdks"])
-                .output()?;
-            if output.status.success() {
-                let sdks = String::from_utf8_lossy(&output.stdout);
-                let mut versions: Vec<String> = sdks
-                    .lines()
-                    .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
-                    .collect();
-                versions.sort();
-                versions.dedup();
-                for v in versions {
-                    println!("{}", v);
+            use crate::utils::sdk::list_installed_sdks;
+            
+            match list_installed_sdks() {
+                Ok(sdks) => {
+                    let mut versions: Vec<String> = sdks
+                        .into_iter()
+                        .map(|(version, _)| version)
+                        .collect();
+                    // Already sorted by list_installed_sdks, but dedup to be safe
+                    versions.dedup();
+                    for v in versions {
+                        println!("{}", v);
+                    }
                 }
-            } else {
-                eprintln!("Failed to list SDK versions");
+                Err(e) => {
+                    eprintln!("Failed to list SDK versions: {}", e);
+                }
             }
         }
         Commands::Use { version } => {

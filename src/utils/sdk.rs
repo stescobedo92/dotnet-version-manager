@@ -11,25 +11,104 @@ pub fn is_dotnet_installed() -> bool {
 }
 
 pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
-    let output = Command::new("dotnet")
-        .args(["--list-sdks"])
-        .output()?;
-    if !output.status.success() {
-        return Err("Failed to list SDKs".into());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    use std::collections::HashSet;
+    use crate::utils::common::get_home_dir;
+    
     let mut sdks = Vec::new();
-    for line in stdout.lines() {
-        // Expected format: "8.0.406 [C:\\Program Files\\dotnet\\sdk]"
-        if let Some((ver_part, path_part)) = line.split_once('[') {
-            let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
-            let base = path_part.trim().trim_end_matches(']').trim();
-            if version.is_empty() || base.is_empty() { continue; }
-            let mut pb = PathBuf::from(base);
-            pb.push(&version);
-            sdks.push((version, pb));
+    let mut seen_versions = HashSet::new();
+    
+    // First, check system dotnet
+    if let Ok(output) = Command::new("dotnet").args(["--list-sdks"]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Expected format: "8.0.406 [C:\\Program Files\\dotnet\\sdk]"
+                if let Some((ver_part, path_part)) = line.split_once('[') {
+                    let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
+                    let base = path_part.trim().trim_end_matches(']').trim();
+                    if version.is_empty() || base.is_empty() { continue; }
+                    let mut pb = PathBuf::from(base);
+                    pb.push(&version);
+                    if seen_versions.insert(version.clone()) {
+                        sdks.push((version, pb));
+                    }
+                }
+            }
         }
     }
+    
+    // Also check user-installed dotnet (e.g., ~/.dotnet on Linux/Mac, %LOCALAPPDATA%\Microsoft\dotnet on Windows)
+    if let Some(home_dir) = get_home_dir() {
+        let user_dotnet_path = if cfg!(windows) {
+            // On Windows, check %LOCALAPPDATA%\Microsoft\dotnet
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                PathBuf::from(local_app_data).join("Microsoft").join("dotnet").join("dotnet.exe")
+            } else {
+                home_dir.join(".dotnet").join("dotnet.exe")
+            }
+        } else {
+            // On Linux/Mac, check ~/.dotnet
+            home_dir.join(".dotnet").join("dotnet")
+        };
+        
+        // Try to use the user dotnet if it exists
+        if user_dotnet_path.exists() {
+            if let Ok(output) = Command::new(&user_dotnet_path).args(["--list-sdks"]).output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Some((ver_part, path_part)) = line.split_once('[') {
+                            let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
+                            let base = path_part.trim().trim_end_matches(']').trim();
+                            if version.is_empty() || base.is_empty() { continue; }
+                            let mut pb = PathBuf::from(base);
+                            pb.push(&version);
+                            // Only add if we haven't seen this version yet
+                            if seen_versions.insert(version.clone()) {
+                                sdks.push((version, pb));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Also manually check the user SDK directory in case dotnet isn't there
+        let user_sdk_dir = if cfg!(windows) {
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                PathBuf::from(local_app_data).join("Microsoft").join("dotnet").join("sdk")
+            } else {
+                home_dir.join(".dotnet").join("sdk")
+            }
+        } else {
+            home_dir.join(".dotnet").join("sdk")
+        };
+        
+        if user_sdk_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&user_sdk_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(version_name) = entry.file_name().to_str() {
+                            let version = version_name.to_string();
+                            // Only add if we haven't seen this version yet
+                            if seen_versions.insert(version.clone()) {
+                                sdks.push((version, entry.path()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Sort by version for consistent output
+    sdks.sort_by(|a, b| {
+        // Try to parse as version numbers for proper sorting
+        let a_parts: Vec<u32> = a.0.split('.').filter_map(|s| s.parse().ok()).collect();
+        let b_parts: Vec<u32> = b.0.split('.').filter_map(|s| s.parse().ok()).collect();
+        a_parts.cmp(&b_parts)
+    });
+    
     Ok(sdks)
 }
 
