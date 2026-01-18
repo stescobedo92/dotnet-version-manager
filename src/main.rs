@@ -134,6 +134,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Failed to configure PATH: {}", e);
             }
         }
+        Commands::Consolidate { yes } => {
+            commands::consolidate::handle_consolidate(*yes).await?;
+        }
     }
 
     Ok(())
