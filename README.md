@@ -15,10 +15,10 @@
 
 In .NET development, different projects often require different SDK versions. `dver` helps you:
 
-1.  **Ensure Consistency**: Keep your team on the same .NET SDK version.
-2.  **Switch with Ease**: Quickly switch between .NET versions for different projects.
-3.  **Simplify Setup**: Easily set up new development environments.
-4.  **Control Versions**: Specify and control the exact .NET SDK version for each project.
+1. **Ensure Consistency**: Keep your team on the same .NET SDK version.
+2. **Switch with Ease**: Quickly switch between .NET versions for different projects.
+3. **Simplify Setup**: Easily set up new development environments.
+4. **Control Versions**: Specify and control the exact .NET SDK version for each project.
 
 ## Installation
 
@@ -32,7 +32,13 @@ After installing `dver`, it's recommended to run the `doctor` command to ensure 
 dver doctor
 ```
 
-The `doctor` command will check if the .NET SDK installation directory is in your `PATH` and provide instructions on how to add it if it's missing. This is crucial for the `dotnet` command to find the SDKs installed by `dver`.
+The `doctor` command will check if the .NET SDK installation directory is in your `PATH`. If it detects issues, we recommend running:
+
+```bash
+dver setup
+```
+
+This will automatically configure your shell or system environment environment to prioritize the versions managed by `dver`.
 
 ## Usage
 
@@ -66,6 +72,12 @@ Set the .NET SDK version for the current directory by creating a `global.json` f
 
 ```bash
 dver use 8.0.406
+```
+
+Set the .NET SDK version globally for your user (updates `~/global.json`).
+
+```bash
+dver use 8.0.406 --global
 ```
 
 ### `uninstall`
