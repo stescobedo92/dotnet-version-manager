@@ -14,9 +14,15 @@ pub enum Commands {
     /// List available SDK versions
     List,
     /// Set SDK version
-    Use { 
-        /// SDK version to set (e.g., 8.0.100)
-        version: String 
+    Use {
+        /// SDK version to set (optional if --clear is used)
+        version: Option<String>,
+        /// Set the version globally (updates user's home global.json)
+        #[arg(long, short)]
+        global: bool,
+        /// Remove the global.json configuration to revert to system default
+        #[arg(long)]
+        clear: bool,
     },
     /// Check if dotnet is installed and install if not
     Install {
@@ -32,6 +38,7 @@ pub enum Commands {
     },
     Uninstall {
         /// Version to uninstall. Can be a full version like 8.0.406 or a major version like 8
+        #[arg(long)]
         version: Option<String>,
         /// Remove all installed SDK versions managed by dotnet
         #[arg(long)]
@@ -39,4 +46,6 @@ pub enum Commands {
     },
     /// Check for common issues
     Doctor,
+    /// Automatically configure Environment variables (PATH) to prioritize dver
+    Setup,
 }
