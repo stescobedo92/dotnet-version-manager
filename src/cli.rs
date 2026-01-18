@@ -48,4 +48,10 @@ pub enum Commands {
     Doctor,
     /// Automatically configure Environment variables (PATH) to prioritize dver
     Setup,
+    /// Migrate all .NET SDKs from other installations (Homebrew, Snap, etc.) into the dver-managed ~/.dotnet folder
+    Consolidate {
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
