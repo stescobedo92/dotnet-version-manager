@@ -21,7 +21,7 @@ pub async fn handle_consolidate(skip_confirm: bool) -> Result<(), Box<dyn std::e
     // Extract unique versions
     let mut unique_versions: HashSet<String> = HashSet::new();
     let mut non_managed_count = 0;
-    let mut managed_count = 0;
+    let mut _managed_count = 0;
 
     let home = crate::utils::common::get_home_dir();
     let managed_path_prefix = home.as_ref().map(|h| {
@@ -35,7 +35,7 @@ pub async fn handle_consolidate(skip_confirm: bool) -> Result<(), Box<dyn std::e
         }
     });
 
-    for (location, sdks) in &sdks_by_location {
+    for (_location, sdks) in &sdks_by_location {
         for sdk in sdks {
             unique_versions.insert(sdk.version.clone());
 
@@ -45,7 +45,7 @@ pub async fn handle_consolidate(skip_confirm: bool) -> Result<(), Box<dyn std::e
                 .unwrap_or(false);
 
             if is_managed {
-                managed_count += 1;
+                _managed_count += 1;
             } else {
                 non_managed_count += 1;
             }
@@ -172,5 +172,13 @@ pub async fn handle_consolidate(skip_confirm: bool) -> Result<(), Box<dyn std::e
     println!();
     println!("📌 Next step: Restart your terminal or run 'source ~/.zshrc' to apply PATH changes.");
 
+    Ok(())
+}
+
+/// Silent consolidation check - runs after install to ensure PATH is configured.
+/// This is a lightweight version that only checks/configures PATH without reinstalling.
+pub fn ensure_path_configured() -> Result<(), Box<dyn std::error::Error>> {
+    // Silently ensure PATH is configured for managed location
+    let _ = move_to_top_of_path();
     Ok(())
 }

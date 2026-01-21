@@ -1,4 +1,3 @@
-use std::io;
 use std::process::Command;
 
 pub fn try_uninstall_all() {

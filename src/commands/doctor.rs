@@ -30,7 +30,9 @@ pub fn run_doctor_checks() {
         Command::new("which").arg("dotnet").output()
     };
 
+    #[allow(unused_assignments)]
     let mut current_dotnet_path = PathBuf::new();
+    #[allow(unused_assignments)]
     let mut is_shadowed = false;
 
     if let Ok(output) = which_output {
@@ -64,7 +66,7 @@ pub fn run_doctor_checks() {
         let separator = if cfg!(windows) { ';' } else { ':' };
         let paths: Vec<&str> = path_var.split(separator).collect();
 
-        let dver_dir_str = dver_dotnet_dir.to_string_lossy();
+        let _dver_dir_str = dver_dotnet_dir.to_string_lossy();
         let dver_in_path = paths
             .iter()
             .any(|p| Path::new(p) == dver_dotnet_dir || Path::new(p) == dver_dotnet_dir.join("")); // some paths might have trailing slash

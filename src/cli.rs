@@ -47,7 +47,11 @@ pub enum Commands {
     /// Check for common issues
     Doctor,
     /// Automatically configure Environment variables (PATH) to prioritize dver
-    Setup,
+    Setup {
+        /// Install shell wrappers to intercept package manager dotnet installs (brew, apt, choco)
+        #[arg(long)]
+        intercept: bool,
+    },
     /// Migrate all .NET SDKs from other installations (Homebrew, Snap, etc.) into the dver-managed ~/.dotnet folder
     Consolidate {
         /// Skip confirmation prompt

@@ -128,6 +128,12 @@ pub async fn handle_install(
 
     println!("dotnet installation completed successfully.");
 
+    // Auto-configure PATH to ensure the managed location is in PATH
+    use crate::commands::consolidate::ensure_path_configured;
+    if let Err(e) = ensure_path_configured() {
+        eprintln!("⚠️  Note: Could not auto-configure PATH: {}", e);
+    }
+
     // Post-install hint
     println!(
         "\nNOTE: To use the installed version, ensure the installation directory is in your PATH."

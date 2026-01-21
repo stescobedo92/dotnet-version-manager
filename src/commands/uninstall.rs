@@ -1,13 +1,12 @@
-use std::fs::{self, remove_dir_all};
+use std::fs::remove_dir_all;
 use std::io;
-use std::path::PathBuf;
 
 pub async fn handle_uninstall(
     version: Option<String>,
     all: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::utils::sdk::list_installed_sdks_grouped;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     // We fetch grouped SDKs to find ALL instances of the version
     // We fetch grouped SDKs to find ALL instances of the version

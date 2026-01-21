@@ -3,7 +3,7 @@ use crate::utils::sdk::list_installed_sdks_grouped;
 use serde_json::json;
 use std::env;
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub async fn handle_use(
     version_arg: Option<String>,
@@ -152,6 +152,7 @@ fn is_version_installed(
     Ok(None)
 }
 
+#[allow(dead_code)]
 struct VersionLocation {
     version: String,
     path: std::path::PathBuf,

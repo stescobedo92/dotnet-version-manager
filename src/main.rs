@@ -4,8 +4,7 @@ mod utils;
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use serde_json::json;
-use std::fs::File;
+
 use std::process::Command;
 
 #[tokio::main]
@@ -129,9 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor => {
             commands::doctor::run_doctor_checks();
         }
-        Commands::Setup => {
+        Commands::Setup { intercept } => {
             if let Err(e) = commands::setup::move_to_top_of_path() {
                 eprintln!("Failed to configure PATH: {}", e);
+            }
+            if *intercept {
+                if let Err(e) = commands::setup::install_intercept_wrappers() {
+                    eprintln!("Failed to install intercept wrappers: {}", e);
+                }
             }
         }
         Commands::Consolidate { yes } => {

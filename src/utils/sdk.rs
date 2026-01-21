@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
+#[allow(dead_code)]
 pub fn is_dotnet_installed() -> bool {
     Command::new("dotnet")
         .arg("--version")
@@ -241,6 +242,7 @@ fn check_directory_for_sdks(
     }
 }
 
+#[allow(dead_code)]
 pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
     let grouped = list_installed_sdks_grouped()?;
     let mut all_sdks = Vec::new();
@@ -274,6 +276,7 @@ pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::erro
     Ok(all_sdks)
 }
 
+#[allow(dead_code)]
 pub fn find_matching_versions(
     pattern: &str,
 ) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
@@ -295,6 +298,7 @@ pub fn find_matching_versions(
     Ok(prefix_matches)
 }
 
+#[allow(dead_code)]
 pub fn prompt_user_selection(
     matches: &[(String, PathBuf)],
 ) -> Result<usize, Box<dyn std::error::Error>> {
