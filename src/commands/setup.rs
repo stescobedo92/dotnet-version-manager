@@ -1,83 +1,156 @@
-use crate::utils::common::get_home_dir;
+use crate::utils::common::{ensure_dir, get_shims_dir};
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
+
+#[cfg(unix)]
+use crate::utils::common::{get_dver_root, get_home_dir};
+#[cfg(unix)]
+use std::path::PathBuf;
+
+#[cfg(unix)]
+const UNIX_BLOCK_START: &str = "# >>> dver >>>";
+#[cfg(unix)]
+const UNIX_BLOCK_END: &str = "# <<< dver <<<";
 
 pub fn move_to_top_of_path() -> Result<(), Box<dyn std::error::Error>> {
-    let home = get_home_dir().ok_or("Could not determine home directory")?;
+    ensure_shims_exist()?;
 
-    // Determine the managed directory location based on OS
-    let dver_dir = if cfg!(windows) {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            PathBuf::from(local_app_data)
-                .join("Microsoft")
-                .join("dotnet")
-        } else {
-            home.join("AppData")
-                .join("Local")
-                .join("Microsoft")
-                .join("dotnet")
-        }
-    } else {
-        home.join(".dotnet")
-    };
-
-    println!("Configuring PATH for: {:?}", dver_dir);
-    println!("This will ensure managed .NET SDKs take precedence.");
-
+    let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
     if cfg!(windows) {
-        configure_windows_path(&dver_dir)?;
+        configure_windows_path(&shims_dir)?;
     } else {
-        configure_unix_path(&dver_dir)?;
+        configure_unix_path(&shims_dir)?;
     }
 
-    println!("✅ Configuration applied successfully.");
-    println!("⚠️  You may need to restart your terminal or shell for changes to take effect.");
+    println!("dver setup completed.");
+    println!("Restart your shell so the updated PATH takes effect.");
+    Ok(())
+}
+
+pub fn ensure_shims_exist() -> Result<(), Box<dyn std::error::Error>> {
+    let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
+    ensure_dir(&shims_dir)?;
+
+    let current_exe = env::current_exe()?;
+    if cfg!(windows) {
+        write_windows_shim(&current_exe, &shims_dir.join("dotnet.cmd"))?;
+    } else {
+        write_unix_shim(&current_exe, &shims_dir.join("dotnet"))?;
+    }
 
     Ok(())
 }
 
 #[cfg(windows)]
-fn configure_windows_path(dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn configure_windows_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use winreg::enums::*;
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu.create_subkey("Environment")?;
+    let (env_key, _) = hkcu.create_subkey("Environment")?;
 
-    let current_path: String = env.get_value("Path").unwrap_or_default();
-    let dver_str = dver_dir.to_str().ok_or("Invalid path string")?;
+    let current_path: String = env_key.get_value("Path").unwrap_or_default();
+    let shims_str = shims_dir.to_str().ok_or("Invalid shims path")?;
+    let mut entries: Vec<&str> = current_path
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    entries.retain(|entry| !paths_equal_windows(entry, shims_str));
+    entries.insert(0, shims_str);
 
-    // Check if distinct parts already contain it
-    let mut parts: Vec<&str> = current_path.split(';').filter(|s| !s.is_empty()).collect();
-
-    // Remove existing dver entries to avoid duplicates and ensure we are top
-    parts.retain(|&p| p != dver_str && Path::new(p) != dver_dir);
-
-    // Prepend
-    parts.insert(0, dver_str);
-
-    let new_path = parts.join(";");
-
-    env.set_value("Path", &new_path)?;
-
-    // Broadcast change (simplified, better to just tell user to restart)
-    // In a real CLI usually we just modify registry and ask for restart.
-
-    println!("Updated User Environment Variable 'Path' in Registry.");
-
+    env_key.set_value("Path", &entries.join(";"))?;
+    println!("Updated the user PATH to include {}.", shims_dir.display());
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn configure_windows_path(_dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn configure_windows_path(_shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn configure_unix_path(dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let home = get_home_dir().ok_or("No home dir")?;
+fn configure_unix_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let rc_file = detect_unix_rc_file()?;
+    let dver_root = get_dver_root().ok_or("Could not determine dver root")?;
+    let new_block = format!(
+        "{UNIX_BLOCK_START}\nexport DVER_ROOT=\"{}\"\nexport PATH=\"{}:$PATH\"\n{UNIX_BLOCK_END}\n",
+        dver_root.display(),
+        shims_dir.display()
+    );
+
+    let existing = if rc_file.exists() {
+        fs::read_to_string(&rc_file)?
+    } else {
+        String::new()
+    };
+
+    let updated = upsert_config_block(&existing, &new_block);
+    fs::write(&rc_file, updated)?;
+    println!("Updated {}.", rc_file.display());
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn configure_unix_path(_shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+pub fn remove_configuration() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(windows) {
+        let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
+        remove_windows_path(&shims_dir)?;
+    } else {
+        remove_unix_path()?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_windows_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env_key, _) = hkcu.create_subkey("Environment")?;
+    let current_path: String = env_key.get_value("Path").unwrap_or_default();
+    let shims_str = shims_dir.to_str().ok_or("Invalid shims path")?;
+
+    let mut entries: Vec<&str> = current_path
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    entries.retain(|entry| !paths_equal_windows(entry, shims_str));
+    env_key.set_value("Path", &entries.join(";"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_windows_path(_shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_unix_path() -> Result<(), Box<dyn std::error::Error>> {
+    let rc_file = detect_unix_rc_file()?;
+    if !rc_file.exists() {
+        return Ok(());
+    }
+
+    let existing = fs::read_to_string(&rc_file)?;
+    let updated = remove_config_block(&existing);
+    fs::write(&rc_file, updated)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_unix_path() -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn detect_unix_rc_file() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let home = get_home_dir().ok_or("Could not determine the home directory")?;
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
     let rc_file = if shell.contains("zsh") {
@@ -92,177 +165,122 @@ fn configure_unix_path(dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         home.join(".profile")
     };
 
-    println!("Detected shell: {}", shell);
-    println!("Updating configuration file: {:?}", rc_file);
+    Ok(rc_file)
+}
 
-    let dver_dir_str = dver_dir.to_str().ok_or("Invalid path")?;
+#[cfg(unix)]
+fn write_unix_shim(
+    dver_executable: &Path,
+    shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
 
-    // We want to prepend to PATH.
-    // export DOTNET_ROOT="..."
-    // export PATH="$DOTNET_ROOT:$PATH"
-
-    let lines_to_add = format!(
-        "\n# dver configuration\nexport DOTNET_ROOT=\"{}\"\nexport PATH=\"$DOTNET_ROOT:$PATH\"\n",
-        dver_dir_str
+    let contents = format!(
+        "#!/usr/bin/env sh\nexec {} __internal_shim \"$@\"\n",
+        shell_quote(dver_executable)
     );
-
-    // Read file to check if already present
-    let content = if rc_file.exists() {
-        fs::read_to_string(&rc_file)?
-    } else {
-        String::new()
-    };
-
-    if content.contains("dver configuration") || content.contains(dver_dir_str) {
-        println!("Configuration seems to already exist in {:?}.", rc_file);
-        println!("We will append the precedence fix to the end of the file to ensure it overrides other settings.");
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&rc_file)?;
-
-    write!(file, "{}", lines_to_add)?;
-
-    println!("Added configuration to {:?}.", rc_file);
-
+    fs::write(shim_path, contents)?;
+    fs::set_permissions(shim_path, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn configure_unix_path(_dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
-pub fn remove_configuration() -> Result<(), Box<dyn std::error::Error>> {
-    let home = get_home_dir().ok_or("Could not determine home directory")?;
-
-    // Determine the managed directory location based on OS for matching purposes
-    let dver_dir = if cfg!(windows) {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            PathBuf::from(local_app_data)
-                .join("Microsoft")
-                .join("dotnet")
-        } else {
-            home.join("AppData")
-                .join("Local")
-                .join("Microsoft")
-                .join("dotnet")
-        }
-    } else {
-        home.join(".dotnet")
-    };
-
-    if cfg!(windows) {
-        remove_windows_path(&dver_dir)?;
-    } else {
-        remove_unix_path(&dver_dir)?;
-    }
-
+fn write_unix_shim(
+    _dver_executable: &Path,
+    _shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn remove_windows_path(dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu.create_subkey("Environment")?;
-
-    let current_path: String = env.get_value("Path").unwrap_or_default();
-    let dver_str = dver_dir.to_str().ok_or("Invalid path string")?;
-
-    let mut parts: Vec<&str> = current_path.split(';').filter(|s| !s.is_empty()).collect();
-
-    // Remove dver entries
-    let original_len = parts.len();
-    parts.retain(|&p| p != dver_str && Path::new(p) != dver_dir);
-
-    if parts.len() < original_len {
-        let new_path = parts.join(";");
-        env.set_value("Path", &new_path)?;
-        println!("✅ Removed dver from User PATH in Registry.");
-    } else {
-        println!("dver not found in User PATH.");
-    }
-
+fn write_windows_shim(
+    dver_executable: &Path,
+    shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = format!(
+        "@echo off\r\n\"{}\" __internal_shim %*\r\n",
+        dver_executable.display()
+    );
+    fs::write(shim_path, contents)?;
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn remove_windows_path(_dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_windows_shim(
+    _dver_executable: &Path,
+    _shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn paths_equal_windows(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
 #[cfg(unix)]
-fn remove_unix_path(dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let home = get_home_dir().ok_or("No home dir")?;
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+fn shell_quote(path: &Path) -> String {
+    let value = path.display().to_string();
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
 
-    // We try to clean up known config files.
-    // Since 'setup' only targets one file based on SHELL, we should try to remove from that one.
-    // Or ideally, check all common ones? Let's stick to the detection logic for now to avoid side effects.
+#[cfg(unix)]
+fn upsert_config_block(existing: &str, block: &str) -> String {
+    let without_old_block = remove_config_block(existing);
+    if without_old_block.trim().is_empty() {
+        return block.to_string();
+    }
 
-    let rc_files = vec![
-        home.join(".zshrc"),
-        home.join(".bashrc"),
-        home.join(".bash_profile"),
-        home.join(".profile"),
-    ];
+    format!("{}\n{}", without_old_block.trim_end(), block)
+}
 
-    let dver_dir_str = dver_dir.to_str().ok_or("Invalid path")?;
-    let marker = "# dver configuration";
+#[cfg(unix)]
+fn remove_config_block(existing: &str) -> String {
+    let mut lines = Vec::new();
+    let mut skipping = false;
 
-    for rc_file in rc_files {
-        if rc_file.exists() {
-            let content = fs::read_to_string(&rc_file)?;
-            if content.contains(marker) {
-                // We basically want to remove the block we added.
-                // Naive approach: remove lines containing our distinct signatures?
-                // Our block is:
-                // \n# dver configuration\nexport DOTNET_ROOT="..."\nexport PATH="$DOTNET_ROOT:$PATH"\n
+    for line in existing.lines() {
+        if line.trim() == UNIX_BLOCK_START {
+            skipping = true;
+            continue;
+        }
 
-                let explicit_export_root = format!("export DOTNET_ROOT=\"{}\"", dver_dir_str);
+        if line.trim() == UNIX_BLOCK_END {
+            skipping = false;
+            continue;
+        }
 
-                // Let's filter out lines that look like our config
-                let new_lines: Vec<&str> = content
-                    .lines()
-                    .filter(|line| !line.contains(marker))
-                    .filter(|line| !line.contains(&explicit_export_root))
-                    .filter(|line| !line.contains("export PATH=\"$DOTNET_ROOT:$PATH\"")) // This is generic, might be risky?
-                    // But in our setup we wrote it exactly like that.
-                    // If user wrote it manually differently, we won't touch it.
-                    .collect();
-
-                let new_content = new_lines.join("\n");
-
-                // Only write if changed (length difference - assuming we removed something)
-                // Note: new_lines.join adds newlines back but might change trailing newline behavior. This is usually fine for rc files.
-                if new_content.len() < content.len() {
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .truncate(true)
-                        .open(&rc_file)?;
-                    write!(file, "{}", new_content)?;
-                    #[cfg(unix)]
-                    {
-                        // Ensure trailing newline if file non-empty
-                        if !new_content.is_empty() {
-                            write!(file, "\n")?;
-                        }
-                    }
-                    println!("✅ Removed dver configuration from {:?}", rc_file);
-                }
-            }
+        if !skipping {
+            lines.push(line);
         }
     }
 
-    Ok(())
+    let mut result = lines.join("\n");
+    if !result.is_empty() {
+        result.push('\n');
+    }
+
+    result
 }
 
-#[cfg(not(unix))]
-fn remove_unix_path(_dver_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaces_existing_dver_block() {
+        let old = format!("{UNIX_BLOCK_START}\nold\n{UNIX_BLOCK_END}\n");
+        let new = format!("{UNIX_BLOCK_START}\nnew\n{UNIX_BLOCK_END}\n");
+        let updated = upsert_config_block(&old, &new);
+        assert_eq!(updated, new);
+    }
+
+    #[test]
+    fn appends_new_dver_block() {
+        let existing = "export PATH=\"/usr/bin:$PATH\"\n";
+        let new = format!("{UNIX_BLOCK_START}\nnew\n{UNIX_BLOCK_END}\n");
+        let updated = upsert_config_block(existing, &new);
+        assert!(updated.contains("export PATH=\"/usr/bin:$PATH\""));
+        assert!(updated.contains("new"));
+    }
 }

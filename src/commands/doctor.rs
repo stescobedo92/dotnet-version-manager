@@ -1,101 +1,120 @@
-use std::path::{Path, PathBuf};
+use crate::utils::common::{
+    current_working_dir, get_dver_root, get_shims_dir, managed_dotnet_path,
+};
+use crate::utils::platform::path_separator;
+use crate::utils::sdk::{
+    find_nearest_global_json, get_default_version, list_managed_sdks, read_global_json_version,
+    resolve_version_selection, VersionSource,
+};
+use std::env;
+use std::path::PathBuf;
 use std::process::Command;
 
-pub fn run_doctor_checks() {
-    use crate::utils::common::get_home_dir;
+pub fn run_doctor_checks() -> Result<(), Box<dyn std::error::Error>> {
+    let current_dir = current_working_dir()?;
+    let dver_root = get_dver_root().ok_or("Could not determine dver root")?;
+    let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
+    let managed_sdks = list_managed_sdks()?;
 
-    println!("Checking environment configuration...");
-    println!("-------------------------------------");
+    println!("dver root: {}", dver_root.display());
+    println!("dver shims: {}", shims_dir.display());
+    println!("Managed SDKs installed: {}", managed_sdks.len());
 
-    let home = get_home_dir().expect("Could not determine home directory");
-    let dver_dotnet_dir = if cfg!(windows) {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            PathBuf::from(local_app_data)
-                .join("Microsoft")
-                .join("dotnet")
-        } else {
-            home.join("AppData")
-                .join("Local")
-                .join("Microsoft")
-                .join("dotnet")
-        }
+    if let Some(default_version) = get_default_version()? {
+        println!("Default managed version: {default_version}");
     } else {
-        home.join(".dotnet")
-    };
-
-    // 1. Check where 'dotnet' resolves to
-    let which_output = if cfg!(windows) {
-        Command::new("where").arg("dotnet").output()
-    } else {
-        Command::new("which").arg("dotnet").output()
-    };
-
-    let mut current_dotnet_path = PathBuf::new();
-    let mut is_shadowed = false;
-
-    if let Ok(output) = which_output {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // 'where' on windows returns multiple lines, first is active. 'which' usually returns one.
-            let first_path = path_str.lines().next().unwrap_or("").trim();
-            current_dotnet_path = PathBuf::from(first_path);
-
-            println!(
-                "✅ 'dotnet' command found at: {}",
-                current_dotnet_path.display()
-            );
-
-            // Check if it's our managed dotnet
-            if !current_dotnet_path.starts_with(&dver_dotnet_dir) {
-                println!("⚠️  ACTIVE DOTNET IS NOT MANAGED BY DVER");
-                println!("   Current: {}", current_dotnet_path.display());
-                println!("   Managed: {}", dver_dotnet_dir.display());
-                is_shadowed = true;
-            } else {
-                println!("✅ Active 'dotnet' is correctly inside the managed directory.");
-            }
-        } else {
-            println!("❌ 'dotnet' command NOT found in PATH.");
-        }
+        println!("Default managed version: none");
     }
 
-    // 2. Check PATH environment variable
-    if let Ok(path_var) = std::env::var("PATH") {
-        let separator = if cfg!(windows) { ';' } else { ':' };
-        let paths: Vec<&str> = path_var.split(separator).collect();
-
-        let dver_dir_str = dver_dotnet_dir.to_string_lossy();
-        let dver_in_path = paths
-            .iter()
-            .any(|p| Path::new(p) == dver_dotnet_dir || Path::new(p) == dver_dotnet_dir.join("")); // some paths might have trailing slash
-
-        if is_shadowed {
-            println!("\n🔍 DIAGNOSIS: PATH CONFIGURATION ISSUE");
-            println!(
-                "   The system 'dotnet' is taking precedence over the 'dver' managed versions."
-            );
-            println!("   This prevents you from using versions installed by dver.");
-
-            if dver_in_path {
-                println!("   ✅ The managed directory is in your PATH, but it comes AFTER the system dotnet.");
-            } else {
-                println!("   ❌ The managed directory is NOT in your PATH.");
+    if let Some(global_json) = find_nearest_global_json(&current_dir) {
+        match read_global_json_version(&global_json)? {
+            Some(version) => {
+                println!(
+                    "Nearest global.json: {} -> {}",
+                    global_json.display(),
+                    version
+                );
             }
-
-            println!("\n🛠  SUGGESTED FIX:");
-            println!("   Run the following command to automatically fix your PATH:");
-            println!("   dver setup");
-            println!("\n   Alternatively, you can manually fix it by adding the managed directory");
-            println!("   to the BEGINNING of your PATH variable.");
-        } else if !dver_in_path {
-            println!("\n⚠️  The managed directory is not in your PATH.");
-            println!("   You might not be able to use installed SDKs.");
-        } else {
-            println!("\n✅ PATH configuration looks correct.");
+            None => {
+                println!(
+                    "Nearest global.json exists but does not declare sdk.version: {}",
+                    global_json.display()
+                );
+            }
         }
+    } else {
+        println!("Nearest global.json: none");
     }
 
-    println!("\n-------------------------------------");
-    println!("Run 'dver list' to see what versions dver has installed.");
-    println!("Run 'dotnet --list-sdks' to see what the active dotnet sees.");
+    let path_entries = env::var("PATH")
+        .unwrap_or_default()
+        .split(path_separator())
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+    let shims_in_path = path_entries.iter().position(|entry| entry == &shims_dir);
+    match shims_in_path {
+        Some(index) => println!("PATH contains dver shims at position {}.", index + 1),
+        None => println!("PATH does not contain the dver shims directory. Run 'dver setup'."),
+    }
+
+    if let Some(active_dotnet) = resolve_dotnet_on_path() {
+        println!("Active 'dotnet' on PATH: {}", active_dotnet.display());
+        if active_dotnet.parent() == Some(shims_dir.as_path()) {
+            println!("The active dotnet command is managed by dver.");
+        } else {
+            println!("The active dotnet command is not managed by dver.");
+        }
+    } else {
+        println!("No 'dotnet' command was found on PATH.");
+    }
+
+    if let Some(selection) = resolve_version_selection(&current_dir)? {
+        match selection.source {
+            VersionSource::LocalGlobalJson(path) => {
+                println!(
+                    "dver will resolve dotnet from local global.json: {} ({})",
+                    selection.requested_version,
+                    path.display()
+                );
+            }
+            VersionSource::DefaultAlias => {
+                println!(
+                    "dver will resolve dotnet from the default managed version: {}",
+                    selection.requested_version
+                );
+            }
+        }
+
+        let managed_root = dver_root
+            .join("versions")
+            .join(&selection.requested_version);
+        if managed_dotnet_path(&managed_root).exists() {
+            println!(
+                "Resolved managed dotnet exists at {}.",
+                managed_root.display()
+            );
+        } else {
+            println!(
+                "The requested version {} is not installed under dver. Run 'dver install {}'.",
+                selection.requested_version, selection.requested_version
+            );
+        }
+    } else {
+        println!("dver has no local or default version selected.");
+    }
+
+    Ok(())
+}
+
+fn resolve_dotnet_on_path() -> Option<PathBuf> {
+    let command = if cfg!(windows) { "where" } else { "which" };
+    let output = Command::new(command).arg("dotnet").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().next().map(PathBuf::from)
 }

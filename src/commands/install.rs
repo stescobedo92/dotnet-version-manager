@@ -1,139 +1,56 @@
-use crate::utils::{common, downloader};
-use std::path::PathBuf;
+use crate::commands::setup;
+use crate::utils::downloader::{self, InstallRequest};
+use crate::utils::sdk::{get_default_version, get_managed_sdk, set_default_version};
 
-async fn install_dotnet(
+pub async fn handle_install(
     lts: bool,
-    version: Option<String>,
-    install_path: Option<String>,
+    version_or_channel: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let target_version = if let Some(v) = version {
-        // Simple heuristic: if it looks like X.Y.Z, use it directly. Otherwise treat as channel (X.Y, LTS, STS) and resolve.
-        if v.split('.').count() >= 3 {
-            v
-        } else {
-            println!("Resolving latest version for channel '{}'...", v);
-            downloader::resolve_sdk_version(&v).await?
+    let request = resolve_install_request(lts, version_or_channel)?;
+
+    if let InstallRequest::Version(version) = &request {
+        let normalized = crate::utils::common::normalize_version_input(version);
+        if get_managed_sdk(&normalized)?.is_some() {
+            println!("Managed .NET SDK {normalized} is already installed.");
+            println!("Run 'dver use {normalized}' to select it.");
+            return Ok(());
         }
-    } else {
-        let channel = if lts { "LTS" } else { "LTS" }; // Default to LTS
-        println!("Resolving latest version for channel '{}'...", channel);
-        downloader::resolve_sdk_version(channel).await?
-    };
+    }
 
-    let target_path = if let Some(p) = install_path {
-        PathBuf::from(p)
-    } else {
-        let home = common::get_home_dir().ok_or("Could not determine home directory")?;
-        if cfg!(windows) {
-            // Standard per-user install on Windows
-            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                PathBuf::from(local_app_data)
-                    .join("Microsoft")
-                    .join("dotnet")
-            } else {
-                home.join("AppData")
-                    .join("Local")
-                    .join("Microsoft")
-                    .join("dotnet")
-            }
-        } else {
-            home.join(".dotnet")
-        }
-    };
+    println!("Installing .NET SDK via the official dotnet installer...");
+    println!("Request: {}", request.label());
 
-    // Confirm to user
-    println!(
-        "Installing .NET SDK {} to {:?}",
-        target_version, target_path
-    );
+    let installed_version = downloader::install_sdk(request).await?;
+    setup::ensure_shims_exist()?;
 
-    downloader::download_and_extract(&target_version, &target_path).await?;
+    if get_default_version()?.is_none() {
+        set_default_version(&installed_version)?;
+        println!("Default managed version set to {installed_version}.");
+    }
+
+    println!("Installed managed .NET SDK {installed_version}.");
+    println!("Run 'dver use {installed_version}' to create a local global.json.");
+    println!("Run 'dver setup' once if you want dver to provide the active 'dotnet' command.");
 
     Ok(())
 }
 
-pub async fn handle_install(
+fn resolve_install_request(
     lts: bool,
-    version: Option<String>,
-    install_path: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::utils::downloader;
-    use crate::utils::sdk::list_installed_sdks_grouped;
-
-    // 1. Resolve the version we intend to install
-    let target_version = if let Some(ref v) = version {
-        if v.split('.').count() >= 3 {
-            v.clone()
-        } else {
-            println!("Resolving version for '{}'...", v);
-            downloader::resolve_sdk_version(v).await?
+    version_or_channel: Option<String>,
+) -> Result<InstallRequest, Box<dyn std::error::Error>> {
+    if let Some(value) = version_or_channel {
+        let normalized = crate::utils::common::normalize_version_input(&value);
+        if crate::utils::common::is_probably_specific_version(&normalized) {
+            return Ok(InstallRequest::Version(normalized));
         }
-    } else {
-        let channel = if lts { "LTS" } else { "LTS" };
-        println!("Resolving latest version for channel '{}'...", channel);
-        downloader::resolve_sdk_version(channel).await?
-    };
 
-    // 2. Comprehensive check for existing installations
-    println!(
-        "Checking if .NET SDK {} is already installed...",
-        target_version
-    );
-
-    // We don't check `is_dotnet_installed` here because we want to run our comprehensive check
-    // regardless of whether `dotnet` is in PATH or not (since we scan standard dirs now).
-    match list_installed_sdks_grouped() {
-        Ok(sdks_by_location) => {
-            let mut found_locations = Vec::new();
-
-            for (location, sdks) in &sdks_by_location {
-                for sdk in sdks {
-                    if sdk.version == target_version {
-                        found_locations.push(location.clone());
-                    }
-                }
-            }
-
-            if !found_locations.is_empty() {
-                println!(
-                    "✅ .NET SDK version {} is ALREADY installed in the following location(s):",
-                    target_version
-                );
-                for loc in &found_locations {
-                    println!("   - {}", loc);
-                }
-                println!("\nSkipping installation to prevent duplicates.");
-                println!("Use 'dver use {}' to select this version.", target_version);
-                return Ok(());
-            }
-        }
-        Err(e) => {
-            // If listing fails, warn but proceed, or fail safe?
-            // Given the user constraint, we should probably warn loudly.
-            eprintln!("⚠️  Warning: Failed to scan for existing SDKs: {}", e);
-            eprintln!("Proceeding with installation, but duplicates might occur.");
-        }
+        return Ok(InstallRequest::Channel(value));
     }
 
-    // 3. Proceed with installation (pass resolved version to avoid re-resolving)
-    // We need to modify install_dotnet to take the explicit resolved version or refactor logic.
-    // For now, let's keep calling install_dotnet but pass the resolved version as "version".
-
-    // Since install_dotnet re-resolves if it sees a version string, we pass the exact X.Y.Z string
-    // which the helper handles as "use directly".
-    if let Err(e) = install_dotnet(false, Some(target_version), install_path).await {
-        eprintln!("Installation failed: {}", e);
-        return Err(e);
+    if lts {
+        return Ok(InstallRequest::Channel("LTS".to_string()));
     }
 
-    println!("dotnet installation completed successfully.");
-
-    // Post-install hint
-    println!(
-        "\nNOTE: To use the installed version, ensure the installation directory is in your PATH."
-    );
-    println!("      Or use 'dver use <version>' to configure project-specific version.");
-    println!("      Run 'dver doctor' to verify your configuration.");
-
-    Ok(())
+    Ok(InstallRequest::Channel("LTS".to_string()))
 }

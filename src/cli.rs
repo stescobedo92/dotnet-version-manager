@@ -9,43 +9,48 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Get current dotnet version
+    /// Show the currently active dotnet version
     Current,
-    /// List available SDK versions
+    /// List managed SDK versions installed by dver
     List,
-    /// Set SDK version
+    /// Select a managed SDK version
     Use {
-        /// SDK version to set (optional if --clear is used)
+        /// Managed SDK version to select
         version: Option<String>,
-        /// Set the version globally (updates user's home global.json)
+        /// Set the default managed version instead of writing a local global.json
         #[arg(long, short)]
         global: bool,
-        /// Remove the global.json configuration to revert to system default
+        /// Remove the local global.json or the default managed version when used with --global
         #[arg(long)]
         clear: bool,
     },
-    /// Check if dotnet is installed and install if not
+    /// Install a managed .NET SDK version or channel
     Install {
-        /// Install LTS version
+        /// Version or channel to install, for example 8.0.406, 8.0, STS
+        version: Option<String>,
+        /// Backward-compatible alias for the positional version argument
+        #[arg(long = "version", hide = true)]
+        version_flag: Option<String>,
+        /// Explicit channel to install, for example 8.0 or STS
+        #[arg(long)]
+        channel: Option<String>,
+        /// Install the latest LTS SDK
         #[arg(long)]
         lts: bool,
-        /// Specific version to install
-        #[arg(long)]
-        version: Option<String>,
-        /// The path to install the SDK to
-        #[arg(long)]
-        install_path: Option<String>,
     },
+    /// Uninstall a managed SDK version
     Uninstall {
-        /// Version to uninstall. Can be a full version like 8.0.406 or a major version like 8
-        #[arg(long)]
+        /// Managed SDK version to uninstall
         version: Option<String>,
-        /// Remove all installed SDK versions managed by dotnet
+        /// Backward-compatible alias for the positional version argument
+        #[arg(long = "version", hide = true)]
+        version_flag: Option<String>,
+        /// Remove every managed SDK version and dver PATH configuration
         #[arg(long)]
         all: bool,
     },
-    /// Check for common issues
+    /// Diagnose PATH and SDK resolution issues
     Doctor,
-    /// Automatically configure Environment variables (PATH) to prioritize dver
+    /// Create the dver dotnet shim and add it to PATH
     Setup,
 }
