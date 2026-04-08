@@ -1,73 +1,305 @@
-use std::collections::HashMap;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use crate::utils::common::{
+    compare_versions_desc, ensure_dir, get_default_version_file, get_managed_version_dir,
+    get_versions_dir, managed_dotnet_path, normalize_version_input,
+};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn is_dotnet_installed() -> bool {
-    Command::new("dotnet")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-#[derive(Debug, Clone)]
-pub struct SdkLocation {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSdk {
     pub version: String,
-    pub path: PathBuf,
+    pub root: PathBuf,
 }
 
-pub fn list_installed_sdks_grouped(
-) -> Result<HashMap<String, Vec<SdkLocation>>, Box<dyn std::error::Error>> {
-    use crate::utils::common::get_home_dir;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSdk {
+    pub version: String,
+    pub location: PathBuf,
+}
 
-    let mut sdks_by_location: HashMap<String, Vec<SdkLocation>> = HashMap::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionSource {
+    LocalGlobalJson(PathBuf),
+    DefaultAlias,
+}
 
-    // 1. Check via 'dotnet --list-sdks' (System source of truth)
-    if let Ok(output) = Command::new("dotnet").args(["--list-sdks"]).output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Some((ver_part, path_part)) = line.split_once('[') {
-                    let version = ver_part.split_whitespace().next().unwrap_or("").to_string();
-                    let base = path_part.trim().trim_end_matches(']').trim();
-                    if version.is_empty() || base.is_empty() {
-                        continue;
-                    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionSelection {
+    pub requested_version: String,
+    pub source: VersionSource,
+}
 
-                    let mut pb = PathBuf::from(base);
-                    pb.push(&version);
+#[derive(Debug, Deserialize)]
+struct GlobalJsonFile {
+    sdk: Option<GlobalJsonSdk>,
+}
 
-                    let location_key = base.to_string();
-                    sdks_by_location
-                        .entry(location_key.clone())
-                        .or_default()
-                        .push(SdkLocation { version, path: pb });
-                }
-            }
+#[derive(Debug, Deserialize)]
+struct GlobalJsonSdk {
+    version: Option<String>,
+}
+
+pub fn list_managed_sdks() -> Result<Vec<ManagedSdk>, Box<dyn std::error::Error>> {
+    let versions_dir = get_versions_dir().ok_or("Could not determine dver versions directory")?;
+    ensure_dir(&versions_dir)?;
+
+    let mut versions = Vec::new();
+    for entry in fs::read_dir(&versions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+
+        if !managed_dotnet_path(&path).exists() {
+            continue;
+        }
+
+        versions.push(ManagedSdk {
+            version: name,
+            root: path,
+        });
+    }
+
+    versions.sort_by(|left, right| compare_versions_desc(&left.version, &right.version));
+    Ok(versions)
+}
+
+pub fn get_managed_sdk(version: &str) -> Result<Option<ManagedSdk>, Box<dyn std::error::Error>> {
+    let normalized = normalize_version_input(version);
+    let path = get_managed_version_dir(&normalized)
+        .ok_or("Could not determine managed version directory")?;
+
+    if path.exists() && managed_dotnet_path(&path).exists() {
+        return Ok(Some(ManagedSdk {
+            version: normalized,
+            root: path,
+        }));
+    }
+
+    Ok(None)
+}
+
+pub fn resolve_managed_sdk(selector: &str) -> Result<ManagedSdk, Box<dyn std::error::Error>> {
+    let selector = normalize_version_input(selector);
+    let sdks = list_managed_sdks()?;
+    resolve_managed_sdk_from_list(&selector, &sdks)
+}
+
+fn resolve_managed_sdk_from_list(
+    selector: &str,
+    sdks: &[ManagedSdk],
+) -> Result<ManagedSdk, Box<dyn std::error::Error>> {
+    if let Some(exact) = sdks.iter().find(|sdk| sdk.version == selector) {
+        return Ok(exact.clone());
+    }
+
+    let matches: Vec<_> = sdks
+        .iter()
+        .filter(|sdk| sdk.version.starts_with(selector))
+        .cloned()
+        .collect();
+
+    match matches.len() {
+        0 => Err(format!(
+            "Managed .NET SDK version '{selector}' is not installed. Run 'dver install {selector}'."
+        )
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let versions = matches
+                .iter()
+                .map(|sdk| sdk.version.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "Version selector '{selector}' is ambiguous. Matching managed versions: {versions}"
+            )
+            .into())
+        }
+    }
+}
+
+pub fn find_nearest_global_json(start_dir: &Path) -> Option<PathBuf> {
+    let mut current = Some(start_dir);
+    while let Some(dir) = current {
+        let candidate = dir.join("global.json");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        current = dir.parent();
+    }
+
+    None
+}
+
+pub fn read_global_json_version(path: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let parsed: GlobalJsonFile = serde_json::from_str(&contents)?;
+    Ok(parsed
+        .sdk
+        .and_then(|sdk| sdk.version)
+        .map(|version| normalize_version_input(&version)))
+}
+
+pub fn get_default_version() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(file) = get_default_version_file() else {
+        return Ok(None);
+    };
+
+    if !file.exists() {
+        return Ok(None);
+    }
+
+    let version = fs::read_to_string(file)?;
+    let version = normalize_version_input(version.trim());
+    if version.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(version))
+}
+
+pub fn set_default_version(version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let file = get_default_version_file().ok_or("Could not determine default version file")?;
+    let parent = file
+        .parent()
+        .ok_or("Could not determine default version file parent")?;
+    ensure_dir(parent)?;
+    fs::write(file, format!("{}\n", normalize_version_input(version)))?;
+    Ok(())
+}
+
+pub fn clear_default_version() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(file) = get_default_version_file() else {
+        return Ok(());
+    };
+
+    if file.exists() {
+        fs::remove_file(file)?;
+    }
+
+    Ok(())
+}
+
+pub fn resolve_version_selection(
+    current_dir: &Path,
+) -> Result<Option<VersionSelection>, Box<dyn std::error::Error>> {
+    if let Some(global_json) = find_nearest_global_json(current_dir) {
+        if let Some(version) = read_global_json_version(&global_json)? {
+            return Ok(Some(VersionSelection {
+                requested_version: version,
+                source: VersionSource::LocalGlobalJson(global_json),
+            }));
         }
     }
 
-    // 2. Check User-Installed Dotnet (Managed by dver)
-    if let Some(home_dir) = get_home_dir() {
-        let user_sdk_dir = if cfg!(windows) {
-            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                PathBuf::from(local_app_data)
-                    .join("Microsoft")
-                    .join("dotnet")
-                    .join("sdk")
-            } else {
-                home_dir.join(".dotnet").join("sdk")
-            }
-        } else {
-            home_dir.join(".dotnet").join("sdk")
-        };
-
-        check_directory_for_sdks(&user_sdk_dir, &mut sdks_by_location);
+    if let Some(version) = get_default_version()? {
+        return Ok(Some(VersionSelection {
+            requested_version: version,
+            source: VersionSource::DefaultAlias,
+        }));
     }
 
-    // 3. Check Standard System Locations (in case 'dotnet' command is missing or broken)
-    let system_locations = if cfg!(windows) {
+    Ok(None)
+}
+
+pub fn list_system_sdks() -> Result<Vec<SystemSdk>, Box<dyn std::error::Error>> {
+    let mut discovered = BTreeMap::<(String, PathBuf), SystemSdk>::new();
+
+    collect_sdks_from_dotnet_command(&mut discovered);
+
+    for sdk_dir in standard_system_sdk_dirs() {
+        collect_sdks_from_directory(&sdk_dir, &mut discovered);
+    }
+
+    let mut sdks = discovered.into_values().collect::<Vec<_>>();
+    sdks.sort_by(|left, right| {
+        compare_versions_desc(&left.version, &right.version)
+            .then_with(|| left.location.cmp(&right.location))
+    });
+    Ok(sdks)
+}
+
+fn collect_sdks_from_dotnet_command(target: &mut BTreeMap<(String, PathBuf), SystemSdk>) {
+    let Ok(output) = Command::new("dotnet").arg("--list-sdks").output() else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let Some((version_part, location_part)) = line.split_once('[') else {
+            continue;
+        };
+
+        let version = version_part
+            .split_whitespace()
+            .next()
+            .map(normalize_version_input)
+            .unwrap_or_default();
+
+        let location = location_part.trim().trim_end_matches(']').trim();
+        if version.is_empty() || location.is_empty() {
+            continue;
+        }
+
+        let location = PathBuf::from(location);
+        let key = (version.clone(), location.clone());
+        target.entry(key).or_insert(SystemSdk { version, location });
+    }
+}
+
+fn collect_sdks_from_directory(
+    sdk_dir: &Path,
+    target: &mut BTreeMap<(String, PathBuf), SystemSdk>,
+) {
+    if !sdk_dir.exists() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(sdk_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(version) = entry.file_name().to_str().map(normalize_version_input) else {
+            continue;
+        };
+
+        if version.is_empty()
+            || !version
+                .chars()
+                .next()
+                .is_some_and(|value| value.is_ascii_digit())
+        {
+            continue;
+        }
+
+        let key = (version.clone(), sdk_dir.to_path_buf());
+        target.entry(key).or_insert(SystemSdk {
+            version,
+            location: sdk_dir.to_path_buf(),
+        });
+    }
+}
+
+fn standard_system_sdk_dirs() -> Vec<PathBuf> {
+    if cfg!(windows) {
         vec![
             PathBuf::from(r"C:\Program Files\dotnet\sdk"),
             PathBuf::from(r"C:\Program Files (x86)\dotnet\sdk"),
@@ -75,248 +307,47 @@ pub fn list_installed_sdks_grouped(
     } else if cfg!(target_os = "macos") {
         vec![
             PathBuf::from("/usr/local/share/dotnet/sdk"),
-            PathBuf::from("/opt/homebrew/share/dotnet/sdk"), // Homebrew
-            PathBuf::from("/opt/homebrew/opt/dotnet/libexec/sdk"), // Homebrew alternative
+            PathBuf::from("/opt/homebrew/share/dotnet/sdk"),
+            PathBuf::from("/usr/local/share/dotnet/x64/sdk"),
         ]
     } else {
         vec![
             PathBuf::from("/usr/share/dotnet/sdk"),
             PathBuf::from("/usr/lib/dotnet/sdk"),
+            PathBuf::from("/usr/local/share/dotnet/sdk"),
         ]
-    };
-
-    for loc in system_locations {
-        check_directory_for_sdks(&loc, &mut sdks_by_location);
-    }
-
-    // Sort versions within each location
-    for sdks in sdks_by_location.values_mut() {
-        sdks.sort_by(|a, b| {
-            let a_parts: Vec<u32> = a
-                .version
-                .split('.')
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            let b_parts: Vec<u32> = b
-                .version
-                .split('.')
-                .filter_map(|s| s.parse().ok())
-                .collect();
-
-            for i in 0..a_parts.len().max(b_parts.len()) {
-                let a_val = a_parts.get(i).copied().unwrap_or(0);
-                let b_val = b_parts.get(i).copied().unwrap_or(0);
-                match a_val.cmp(&b_val) {
-                    std::cmp::Ordering::Equal => continue,
-                    other => return other,
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
-
-    Ok(sdks_by_location)
-}
-
-pub fn list_installed_runtimes_grouped(
-) -> Result<HashMap<String, Vec<SdkLocation>>, Box<dyn std::error::Error>> {
-    let mut runtimes_by_location: HashMap<String, Vec<SdkLocation>> = HashMap::new();
-
-    // 1. Check via 'dotnet --list-runtimes' (System source of truth)
-    if let Ok(output) = Command::new("dotnet").args(["--list-runtimes"]).output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Expected format: "Microsoft.NETCore.App 6.0.0 [/usr/share/dotnet/shared/Microsoft.NETCore.App]"
-                if let Some((info_part, path_part)) = line.split_once('[') {
-                    let parts: Vec<&str> = info_part.split_whitespace().collect();
-                    if parts.len() < 2 {
-                        continue;
-                    }
-
-                    let version = parts[1].to_string(); // 6.0.0
-                    let _name = parts[0]; // Microsoft.NETCore.App
-                    let base = path_part.trim().trim_end_matches(']').trim();
-
-                    if version.is_empty() || base.is_empty() {
-                        continue;
-                    }
-
-                    let mut pb = PathBuf::from(base);
-                    pb.push(&version);
-
-                    let location_key = base.to_string();
-                    runtimes_by_location
-                        .entry(location_key.clone())
-                        .or_default()
-                        .push(SdkLocation { version, path: pb });
-                }
-            }
-        }
-    }
-
-    // 2. Check Standard System Locations for Runtimes (shared folder)
-    // Common structure: .../dotnet/shared/{RuntimeName}/{Version}
-    // We want to list all of them.
-
-    let shared_dirs = if cfg!(windows) {
-        vec![
-            PathBuf::from(r"C:\Program Files\dotnet\shared"),
-            PathBuf::from(r"C:\Program Files (x86)\dotnet\shared"),
-        ]
-    } else if cfg!(target_os = "macos") {
-        vec![
-            PathBuf::from("/usr/local/share/dotnet/shared"),
-            PathBuf::from("/opt/homebrew/share/dotnet/shared"),
-            PathBuf::from("/opt/homebrew/opt/dotnet/libexec/shared"),
-            // User reported path: /opt/homebrew/Cellar/dotnet/VERSION/libexec/shared
-            // We can't easily guess the version in the path without scanning Cellar, but if dotnet --list-runtimes found it, we have it.
-            // If dotnet command is missing, we might miss the Cellar ones unless we specifically look for them.
-        ]
-    } else {
-        vec![
-            PathBuf::from("/usr/share/dotnet/shared"),
-            PathBuf::from("/usr/lib/dotnet/shared"),
-        ]
-    };
-
-    for shared_parent in shared_dirs {
-        if shared_parent.exists() {
-            if let Ok(runtime_types) = std::fs::read_dir(&shared_parent) {
-                for entry in runtime_types.flatten() {
-                    if entry.path().is_dir() {
-                        // e.g. Microsoft.NETCore.App
-                        check_directory_for_sdks(&entry.path(), &mut runtimes_by_location);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(runtimes_by_location)
-}
-
-fn check_directory_for_sdks(
-    sdk_dir: &std::path::Path,
-    sdks_by_location: &mut HashMap<String, Vec<SdkLocation>>,
-) {
-    if !sdk_dir.exists() {
-        return;
-    }
-
-    if let Ok(entries) = std::fs::read_dir(sdk_dir) {
-        // Location key is usually the parent of the sdk dir for display niceness, checking consistency with dotnet output
-        // dotnet --list-sdks output: [C:\Program Files\dotnet\sdk]
-        // so we use the parent of the version folder, which is sdk_dir
-        let location_key = sdk_dir.display().to_string();
-
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(version_name) = entry.file_name().to_str() {
-                    let version = version_name.to_string();
-
-                    // Simple validation: must start with digit
-                    if !version.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                        continue;
-                    }
-
-                    // Check if this version is already listed for this specific location
-                    let already_exists = sdks_by_location
-                        .get(&location_key)
-                        .map(|sdks| sdks.iter().any(|sdk| sdk.version == version))
-                        .unwrap_or(false);
-
-                    if !already_exists {
-                        sdks_by_location
-                            .entry(location_key.clone())
-                            .or_default()
-                            .push(SdkLocation {
-                                version,
-                                path: entry.path(),
-                            });
-                    }
-                }
-            }
-        }
     }
 }
 
-pub fn list_installed_sdks() -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
-    let grouped = list_installed_sdks_grouped()?;
-    let mut all_sdks = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for sdks in grouped.values() {
-        for sdk in sdks {
-            all_sdks.push((sdk.version.clone(), sdk.path.clone()));
+    fn sdk(version: &str) -> ManagedSdk {
+        ManagedSdk {
+            version: version.to_string(),
+            root: PathBuf::from(format!("/tmp/{version}")),
         }
     }
 
-    // Sort by version
-    all_sdks.sort_by(|a, b| {
-        let a_parts: Vec<u32> = a.0.split('.').filter_map(|s| s.parse().ok()).collect();
-        let b_parts: Vec<u32> = b.0.split('.').filter_map(|s| s.parse().ok()).collect();
-
-        for i in 0..a_parts.len().max(b_parts.len()) {
-            let a_val = a_parts.get(i).copied().unwrap_or(0);
-            let b_val = b_parts.get(i).copied().unwrap_or(0);
-            match a_val.cmp(&b_val) {
-                std::cmp::Ordering::Equal => continue,
-                other => return other,
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
-
-    // Deduplicate by version (keep first occurrence)
-    let mut seen = std::collections::HashSet::new();
-    all_sdks.retain(|(v, _)| seen.insert(v.clone()));
-
-    Ok(all_sdks)
-}
-
-pub fn find_matching_versions(
-    pattern: &str,
-) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
-    let sdks = list_installed_sdks()?;
-
-    // Exact match first
-    let exact_matches: Vec<_> = sdks.iter().filter(|(v, _)| v == pattern).cloned().collect();
-
-    if !exact_matches.is_empty() {
-        return Ok(exact_matches);
+    #[test]
+    fn resolves_exact_version_first() {
+        let sdks = vec![sdk("8.0.406"), sdk("8.0.407")];
+        let resolved = resolve_managed_sdk_from_list("8.0.406", &sdks).unwrap();
+        assert_eq!(resolved.version, "8.0.406");
     }
 
-    // Partial match (prefix)
-    let prefix_matches: Vec<_> = sdks
-        .into_iter()
-        .filter(|(v, _)| v.starts_with(pattern))
-        .collect();
-
-    Ok(prefix_matches)
-}
-
-pub fn prompt_user_selection(
-    matches: &[(String, PathBuf)],
-) -> Result<usize, Box<dyn std::error::Error>> {
-    println!("\nMultiple matching versions found:");
-    for (i, (ver, _)) in matches.iter().enumerate() {
-        println!("  {}. {}", i + 1, ver);
+    #[test]
+    fn resolves_unique_prefix() {
+        let sdks = vec![sdk("8.0.406"), sdk("9.0.100")];
+        let resolved = resolve_managed_sdk_from_list("8.0", &sdks).unwrap();
+        assert_eq!(resolved.version, "8.0.406");
     }
 
-    print!("\nSelect a version (1-{}): ", matches.len());
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    let selection: usize = input
-        .trim()
-        .parse()
-        .map_err(|_| "Invalid input: please enter a number")?;
-
-    if selection < 1 || selection > matches.len() {
-        return Err("Selection out of range".into());
+    #[test]
+    fn rejects_ambiguous_prefix() {
+        let sdks = vec![sdk("8.0.406"), sdk("8.0.407")];
+        let err = resolve_managed_sdk_from_list("8.0", &sdks).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
     }
-
-    Ok(selection - 1)
 }
