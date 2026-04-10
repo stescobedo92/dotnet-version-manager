@@ -279,6 +279,8 @@ fn check_active_dotnet(shims_dir: &PathBuf) -> Diagnostic {
     let mut details = Vec::new();
     #[cfg(windows)]
     let profile_hook_installed = has_windows_profile_hook(shims_dir);
+    #[cfg(not(windows))]
+    let profile_hook_installed = false;
 
     match resolve_dotnet_on_path() {
         Some(active_dotnet) => {
