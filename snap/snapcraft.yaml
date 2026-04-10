@@ -1,0 +1,31 @@
+name: dver
+base: core24
+version: "0.0.0"
+summary: dver manages .NET SDK versions with an nvm-like workflow.
+description: |
+  dver is a cross-platform .NET SDK version manager inspired by nvm.
+
+  It installs SDKs into a dver-managed root, creates a stable dotnet shim,
+  and lets you switch versions per-project or globally without mutating the
+  shared system .NET installation.
+
+  This snap uses classic confinement because dver needs host-level access to
+  shell profiles, PATH configuration, and managed SDK directories.
+grade: stable
+confinement: classic
+
+parts:
+  dver:
+    plugin: rust
+    source: .
+    build-packages:
+      - pkg-config
+      - libssl-dev
+    override-pull: |
+      craftctl default
+      version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+      craftctl set version="$version"
+
+apps:
+  dver:
+    command: bin/dver

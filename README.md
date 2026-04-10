@@ -132,5 +132,53 @@ The repository now includes:
 - automatic `crates.io` publishing when a new `Cargo.toml` version is pushed to `main` or `master`
 - automatic GitHub Release creation using the same crate version
 - automatic binary packaging for Windows, Linux, and macOS
+- automatic Snap package builds, with Snap Store publication when `SNAPCRAFT_STORE_CREDENTIALS` is configured
+- automatic Scoop manifest publication to the `scoop-bucket` branch
+
+`Cargo.toml` is the single source of truth for versioning:
+
+- bump the crate version in `Cargo.toml`
+- push to `main` or `master`
+- the workflow creates tag `v<version>` automatically
+- the workflow publishes to `crates.io`
+- the workflow creates the GitHub Release with the packaged binaries
 
 The release workflow skips itself when tag `v<crate-version>` already exists.
+
+## Additional distribution channels
+
+### Snapcraft
+
+The repository now contains `snap/snapcraft.yaml` and the release workflow builds a snap automatically.
+
+To publish that snap to the Snap Store, configure the repository secret:
+
+- `SNAPCRAFT_STORE_CREDENTIALS`
+
+Generate it with `snapcraft export-login` for the registered snap name, then store the exported login file content as the secret.
+
+This snap uses `classic` confinement because `dver` is a host-facing version manager and needs access to shell profiles and managed SDK directories.
+
+### Scoop
+
+The release workflow automatically updates a Scoop manifest on the `scoop-bucket` branch.
+
+Users can install from that bucket with:
+
+```powershell
+scoop bucket add dver https://github.com/stescobedo92/dotnet-version-manager --branch scoop-bucket
+scoop install dver
+```
+
+### Flatpak
+
+Flatpak is intentionally not enabled for automatic distribution.
+
+`dver` is designed to manage host SDKs, PATH shims, and shell startup files. That behavior conflicts with Flatpak sandboxing, so shipping a Flatpak package would be misleading unless the tool is redesigned around host-bridging behavior.
+
+### Required secrets
+
+Store-backed publishing still requires these repository secrets:
+
+- `CARGO_REGISTRY_TOKEN`
+- `SNAPCRAFT_STORE_CREDENTIALS`

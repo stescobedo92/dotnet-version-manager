@@ -1,31 +1,149 @@
 use crate::utils::common::{ensure_dir, get_shims_dir};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(unix)]
 use crate::utils::common::{get_dver_root, get_home_dir};
+#[cfg(windows)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(windows)]
+const WINDOWS_BLOCK_START: &str = "# >>> dver >>>";
+#[cfg(windows)]
+const WINDOWS_BLOCK_END: &str = "# <<< dver <<<";
 #[cfg(unix)]
 const UNIX_BLOCK_START: &str = "# >>> dver >>>";
 #[cfg(unix)]
 const UNIX_BLOCK_END: &str = "# <<< dver <<<";
 
 pub fn move_to_top_of_path() -> Result<(), Box<dyn std::error::Error>> {
+    print_setup_header();
+    let progress = ProgressBar::new(3);
+    progress.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} [{bar:24.cyan/blue}] {pos}/{len} {msg}")
+            .expect("valid setup progress template")
+            .progress_chars("##-"),
+    );
+    progress.enable_steady_tick(Duration::from_millis(80));
+
+    progress.set_position(1);
+    progress.set_message("Preparing shims");
     ensure_shims_exist()?;
 
     let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
-    if cfg!(windows) {
-        configure_windows_path(&shims_dir)?;
+    progress.set_position(2);
+    progress.set_message("Configuring shell integration");
+
+    let setup_report = if cfg!(windows) {
+        configure_windows_path(&shims_dir)?
     } else {
-        configure_unix_path(&shims_dir)?;
+        configure_unix_path(&shims_dir)?
+    };
+
+    progress.set_position(3);
+    progress.set_message("Finalizing setup");
+    progress.finish_and_clear();
+
+    print_setup_report(&shims_dir, &setup_report);
+
+    Ok(())
+}
+
+fn print_setup_header() {
+    println!("{}", setup_color("== dver setup ==", SetupStyle::Title));
+    println!(
+        "{}",
+        setup_color(
+            "Creating the dotnet shim and wiring your shell to the dver-managed SDKs.",
+            SetupStyle::Dim
+        )
+    );
+    println!();
+}
+
+fn print_setup_report(shims_dir: &Path, report: &SetupReport) {
+    println!(
+        "{} {}",
+        setup_color("[OK]", SetupStyle::Ok),
+        setup_color("Setup completed", SetupStyle::Title)
+    );
+    println!(
+        "  {}",
+        setup_color(
+            format!("shim directory: {}", shims_dir.display()),
+            SetupStyle::Info
+        )
+    );
+    println!(
+        "  {}",
+        setup_color(
+            format!(
+                "user PATH updated: {}",
+                if report.path_updated { "yes" } else { "no" }
+            ),
+            SetupStyle::Info
+        )
+    );
+
+    if !report.updated_profiles.is_empty() {
+        println!();
+        println!("{}", setup_color("Updated profiles", SetupStyle::Section));
+        for profile in &report.updated_profiles {
+            println!(
+                "  {} {}",
+                setup_color("•", SetupStyle::Ok),
+                setup_color(profile.display().to_string(), SetupStyle::Info)
+            );
+        }
     }
 
-    println!("dver setup completed.");
-    println!("Restart your shell so the updated PATH takes effect.");
-    Ok(())
+    if !report.warnings.is_empty() {
+        println!();
+        println!("{}", setup_color("Warnings", SetupStyle::Warn));
+        for warning in &report.warnings {
+            println!(
+                "  {} {}",
+                setup_color("•", SetupStyle::Warn),
+                setup_color(warning, SetupStyle::Dim)
+            );
+        }
+    }
+
+    println!();
+    println!("{}", setup_color("Next steps", SetupStyle::Section));
+    if cfg!(windows) {
+        println!(
+            "  {}",
+            setup_color(
+                "Open a brand-new PowerShell tab and run `Get-Command dotnet`.",
+                SetupStyle::Info
+            )
+        );
+        println!(
+            "  {}",
+            setup_color(
+                "Then verify with `dotnet --version` inside the folder where you ran `dver use ...`.",
+                SetupStyle::Info
+            )
+        );
+    } else {
+        println!(
+            "  {}",
+            setup_color(
+                "Open a new terminal session so your updated shell profile is loaded.",
+                SetupStyle::Info
+            )
+        );
+        println!(
+            "  {}",
+            setup_color("Then verify with `dotnet --version`.", SetupStyle::Info)
+        );
+    }
 }
 
 pub fn ensure_shims_exist() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +153,7 @@ pub fn ensure_shims_exist() -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = env::current_exe()?;
     if cfg!(windows) {
         write_windows_shim(&current_exe, &shims_dir.join("dotnet.cmd"))?;
+        write_windows_exe_shim(&current_exe, &shims_dir.join("dotnet.exe"))?;
     } else {
         write_unix_shim(&current_exe, &shims_dir.join("dotnet"))?;
     }
@@ -43,7 +162,7 @@ pub fn ensure_shims_exist() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
-fn configure_windows_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn configure_windows_path(shims_dir: &Path) -> Result<SetupReport, Box<dyn std::error::Error>> {
     use winreg::enums::*;
     use winreg::RegKey;
 
@@ -60,17 +179,22 @@ fn configure_windows_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Er
     entries.insert(0, shims_str);
 
     env_key.set_value("Path", &entries.join(";"))?;
-    println!("Updated the user PATH to include {}.", shims_dir.display());
-    Ok(())
+    let mut report = SetupReport {
+        path_updated: true,
+        updated_profiles: Vec::new(),
+        warnings: Vec::new(),
+    };
+    configure_windows_powershell_profile(shims_dir, &mut report)?;
+    Ok(report)
 }
 
 #[cfg(not(windows))]
-fn configure_windows_path(_shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+fn configure_windows_path(_shims_dir: &Path) -> Result<SetupReport, Box<dyn std::error::Error>> {
+    Ok(SetupReport::default())
 }
 
 #[cfg(unix)]
-fn configure_unix_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn configure_unix_path(shims_dir: &Path) -> Result<SetupReport, Box<dyn std::error::Error>> {
     let rc_file = detect_unix_rc_file()?;
     let dver_root = get_dver_root().ok_or("Could not determine dver root")?;
     let new_block = format!(
@@ -87,13 +211,16 @@ fn configure_unix_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error
 
     let updated = upsert_config_block(&existing, &new_block);
     fs::write(&rc_file, updated)?;
-    println!("Updated {}.", rc_file.display());
-    Ok(())
+    Ok(SetupReport {
+        path_updated: true,
+        updated_profiles: vec![rc_file],
+        warnings: Vec::new(),
+    })
 }
 
 #[cfg(not(unix))]
-fn configure_unix_path(_shims_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+fn configure_unix_path(_shims_dir: &Path) -> Result<SetupReport, Box<dyn std::error::Error>> {
+    Ok(SetupReport::default())
 }
 
 pub fn remove_configuration() -> Result<(), Box<dyn std::error::Error>> {
@@ -122,6 +249,7 @@ fn remove_windows_path(shims_dir: &Path) -> Result<(), Box<dyn std::error::Error
         .collect();
     entries.retain(|entry| !paths_equal_windows(entry, shims_str));
     env_key.set_value("Path", &entries.join(";"))?;
+    remove_windows_powershell_profile()?;
     Ok(())
 }
 
@@ -214,8 +342,236 @@ fn write_windows_shim(
 }
 
 #[cfg(windows)]
+fn write_windows_exe_shim(
+    dver_executable: &Path,
+    shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::copy(dver_executable, shim_path)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn write_windows_exe_shim(
+    _dver_executable: &Path,
+    _shim_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(windows)]
 fn paths_equal_windows(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
+}
+
+#[cfg(windows)]
+pub fn windows_powershell_profile_paths() -> Vec<PathBuf> {
+    let candidates = ["pwsh", "powershell"];
+    let mut profiles = Vec::new();
+
+    for shell in candidates {
+        let output = std::process::Command::new(shell)
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("$PROFILE.CurrentUserCurrentHost")
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let profile = stdout.trim();
+                if !profile.is_empty() {
+                    let profile_path = PathBuf::from(profile);
+                    if !profiles.iter().any(|existing| existing == &profile_path) {
+                        profiles.push(profile_path);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(user_profile) = env::var_os("USERPROFILE") {
+        let user_profile = PathBuf::from(user_profile);
+        let fallbacks = [
+            user_profile
+                .join("Documents")
+                .join("PowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+            user_profile
+                .join("Documents")
+                .join("WindowsPowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        ];
+
+        for fallback in fallbacks {
+            if !profiles.iter().any(|existing| existing == &fallback) {
+                profiles.push(fallback);
+            }
+        }
+    }
+
+    profiles
+}
+
+#[cfg(windows)]
+pub fn has_windows_profile_hook(shims_dir: &Path) -> bool {
+    windows_powershell_profile_paths()
+        .into_iter()
+        .any(|profile_path| {
+            let Ok(contents) = fs::read_to_string(profile_path) else {
+                return false;
+            };
+
+            contents.contains(WINDOWS_BLOCK_START)
+                && contents.contains(WINDOWS_BLOCK_END)
+                && contents.contains(&shims_dir.display().to_string())
+        })
+}
+
+#[cfg(windows)]
+fn configure_windows_powershell_profile(
+    shims_dir: &Path,
+    report: &mut SetupReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shim_path = shims_dir.join("dotnet.exe");
+    let block = format!(
+        "{WINDOWS_BLOCK_START}\nif ($env:PATH -notlike \"*{shim_dir}*\") {{\n    $env:PATH = \"{shim_dir};$env:PATH\"\n}}\nfunction global:dotnet {{\n    & '{shim_path}' @Args\n}}\n{WINDOWS_BLOCK_END}\n",
+        shim_dir = shims_dir.display().to_string().replace('\"', "`\""),
+        shim_path = shim_path.display().to_string().replace('\'', "''")
+    );
+
+    let mut wrote_any_profile = false;
+    for profile_path in windows_powershell_profile_paths() {
+        let write_result: Result<(), Box<dyn std::error::Error>> = (|| {
+            if let Some(parent) = profile_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let existing = if profile_path.exists() {
+                fs::read_to_string(&profile_path)?
+            } else {
+                String::new()
+            };
+
+            let updated = upsert_windows_config_block(&existing, &block);
+            fs::write(&profile_path, updated)?;
+            Ok(())
+        })();
+
+        match write_result {
+            Ok(_) => {
+                wrote_any_profile = true;
+                report.updated_profiles.push(profile_path);
+            }
+            Err(error) => {
+                report.warnings.push(format!(
+                    "could not update PowerShell profile {}: {}",
+                    profile_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    if !wrote_any_profile {
+        return Err("Could not update any PowerShell profile with the dver hook.".into());
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct SetupReport {
+    path_updated: bool,
+    updated_profiles: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum SetupStyle {
+    Title,
+    Section,
+    Ok,
+    Warn,
+    Info,
+    Dim,
+}
+
+fn setup_color(value: impl AsRef<str>, style: SetupStyle) -> String {
+    let code = match style {
+        SetupStyle::Title => "1;96",
+        SetupStyle::Section => "1;97",
+        SetupStyle::Ok => "32",
+        SetupStyle::Warn => "33",
+        SetupStyle::Info => "37",
+        SetupStyle::Dim => "90",
+    };
+
+    format!("\x1b[{code}m{}\x1b[0m", value.as_ref())
+}
+
+#[cfg(windows)]
+fn remove_windows_powershell_profile() -> Result<(), Box<dyn std::error::Error>> {
+    for profile_path in windows_powershell_profile_paths() {
+        if !profile_path.exists() {
+            continue;
+        }
+
+        let remove_result: Result<(), Box<dyn std::error::Error>> = (|| {
+            let existing = fs::read_to_string(&profile_path)?;
+            let updated = remove_windows_config_block(&existing);
+            fs::write(&profile_path, updated)?;
+            Ok(())
+        })();
+
+        if let Err(error) = remove_result {
+            eprintln!(
+                "Warning: could not clean PowerShell profile {}: {}",
+                profile_path.display(),
+                error
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn upsert_windows_config_block(existing: &str, block: &str) -> String {
+    let without_old_block = remove_windows_config_block(existing);
+    if without_old_block.trim().is_empty() {
+        return block.to_string();
+    }
+
+    format!("{}\n{}", without_old_block.trim_end(), block)
+}
+
+#[cfg(windows)]
+fn remove_windows_config_block(existing: &str) -> String {
+    let mut lines = Vec::new();
+    let mut skipping = false;
+
+    for line in existing.lines() {
+        if line.trim() == WINDOWS_BLOCK_START {
+            skipping = true;
+            continue;
+        }
+
+        if line.trim() == WINDOWS_BLOCK_END {
+            skipping = false;
+            continue;
+        }
+
+        if !skipping {
+            lines.push(line);
+        }
+    }
+
+    let mut result = lines.join("\n");
+    if !result.is_empty() {
+        result.push('\n');
+    }
+
+    result
 }
 
 #[cfg(unix)]

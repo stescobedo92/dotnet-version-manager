@@ -10,12 +10,18 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare release metadata
     runs-on: ubuntu-latest
     outputs:
       crate_name: ${{ steps.meta.outputs.crate_name }}
+      crate_description: ${{ steps.meta.outputs.crate_description }}
+      release_name: ${{ steps.meta.outputs.release_name }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
       version: ${{ steps.meta.outputs.version }}
       should_release: ${{ steps.meta.outputs.should_release }}
@@ -30,8 +36,10 @@ jobs:
         shell: bash
         run: |
           crate_name=$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          crate_description=$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           tag_name="v${version}"
+          release_name="${crate_name} v${version}"
 
           git fetch --tags --force
 
@@ -42,6 +50,8 @@ jobs:
           fi
 
           echo "crate_name=${crate_name}" >> "$GITHUB_OUTPUT"
+          echo "crate_description=${crate_description}" >> "$GITHUB_OUTPUT"
+          echo "release_name=${release_name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
           echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
@@ -49,11 +59,10 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs:
-      - prepare
-      - publish-crate
-      - build-assets
+    needs: prepare
     if: needs.prepare.outputs.should_release == 'true'
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,10 +70,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Job-level `if` cannot reference `secrets`; gate publish on the env instead.
       - name: Publish crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish --locked
 
   build-assets:
     name: Build release assets on ${{ matrix.os }}
@@ -125,12 +134,71 @@ jobs:
           name: ${{ matrix.artifact_suffix }}
           path: dver-${{ needs.prepare.outputs.version }}-${{ matrix.artifact_suffix }}*
 
+  build-snap:
+    name: Build Snap package
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    outputs:
+      snap_file: ${{ steps.build-snap.outputs.snap }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build snap
+        id: build-snap
+        uses: canonical/action-build@v1
+        with:
+          snapcraft-args: pack
+
+      - name: Upload snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-amd64
+          path: ${{ steps.build-snap.outputs.snap }}
+
+  publish-snap:
+    name: Publish Snap to Snap Store
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build-snap
+    if: needs.prepare.outputs.should_release == 'true'
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+    steps:
+      - name: Download snap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: snap-amd64
+          path: snap-artifact
+
+      - name: Install Snapcraft
+        if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
+        run: sudo snap install snapcraft --classic
+
+      - name: Authenticate with Snap Store
+        if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
+        run: |
+          printf '%s' "$SNAPCRAFT_STORE_CREDENTIALS" > snapcraft.login
+          snapcraft login --with snapcraft.login
+
+      - name: Publish snap
+        if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
+        env:
+          SNAPCRAFT_RELEASE_CHANNEL: ${{ vars.SNAPCRAFT_RELEASE_CHANNEL || 'stable' }}
+        run: |
+          snap_file=$(find snap-artifact -maxdepth 1 -name '*.snap' | head -n1)
+          test -n "$snap_file"
+          snapcraft upload --release="${SNAPCRAFT_RELEASE_CHANNEL}" "$snap_file"
+
   github-release:
     name: Create GitHub release
     runs-on: ubuntu-latest
     needs:
       - prepare
       - build-assets
+      - build-snap
     if: needs.prepare.outputs.should_release == 'true'
     permissions:
       contents: write
@@ -143,6 +211,92 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ needs.prepare.outputs.release_name }}
           tag_name: ${{ needs.prepare.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: release-assets/**/*
+
+  publish-scoop-bucket:
+    name: Publish Scoop manifest
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - github-release
+    if: needs.prepare.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows release asset
+        uses: actions/download-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
+          path: scoop-release
+
+      - name: Update Scoop bucket branch
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          CRATE_DESCRIPTION: ${{ needs.prepare.outputs.crate_description }}
+          SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH || 'scoop-bucket' }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          archive_name="dver-${VERSION}-x86_64-pc-windows-msvc.zip"
+          archive_path="scoop-release/${archive_name}"
+          sha256=$(sha256sum "${archive_path}" | awk '{print $1}')
+          download_url="https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}/${archive_name}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code origin "${SCOOP_BUCKET_BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${SCOOP_BUCKET_BRANCH}:${SCOOP_BUCKET_BRANCH}"
+            git checkout "${SCOOP_BUCKET_BRANCH}"
+          else
+            git checkout -b "${SCOOP_BUCKET_BRANCH}"
+          fi
+
+          mkdir -p bucket
+          cat > bucket/dver.json <<EOF
+          {
+            "version": "${VERSION}",
+            "description": "${CRATE_DESCRIPTION}",
+            "homepage": "https://github.com/${REPOSITORY}",
+            "license": "MIT OR Apache-2.0",
+            "notes": [
+              "Run 'dver setup' in a new PowerShell session after installation."
+            ],
+            "architecture": {
+              "64bit": {
+                "url": "${download_url}",
+                "hash": "${sha256}"
+              }
+            },
+            "bin": "dver.exe",
+            "checkver": {
+              "github": "https://github.com/${REPOSITORY}"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/${REPOSITORY}/releases/download/v\$version/dver-\$version-x86_64-pc-windows-msvc.zip"
+                }
+              }
+            }
+          }
+          EOF
+
+          git add bucket/dver.json
+          if git diff --cached --quiet; then
+            echo "Scoop manifest already up to date."
+            exit 0
+          fi
+
+          git commit -m "chore: update scoop manifest for ${TAG_NAME} [skip ci]"
+          git push origin "${SCOOP_BUCKET_BRANCH}"

@@ -4,12 +4,18 @@ mod utils;
 
 use clap::Parser;
 use cli::{Cli, Commands};
+use std::path::Path;
 use std::process::Command;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os();
-    let _program_name = args.next();
+    let program_name = args.next();
+
+    if is_dotnet_shim_invocation(program_name.as_deref()) {
+        let exit_code = commands::shim::handle_dotnet_shim(args)?;
+        std::process::exit(exit_code);
+    }
 
     if args
         .next()
@@ -67,6 +73,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn is_dotnet_shim_invocation(program_name: Option<&std::ffi::OsStr>) -> bool {
+    let Some(program_name) = program_name else {
+        return false;
+    };
+
+    let stem = Path::new(program_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+
+    stem.eq_ignore_ascii_case("dotnet")
+}
+
 fn handle_current_command() -> Result<(), Box<dyn std::error::Error>> {
     let current_dir = crate::utils::common::current_working_dir()?;
 
@@ -80,7 +99,25 @@ fn handle_current_command() -> Result<(), Box<dyn std::error::Error>> {
 
         if output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout);
-            println!("Current managed dotnet version: {}", version.trim());
+            let source = match selection.source {
+                crate::utils::sdk::VersionSource::LocalGlobalJson(path) => {
+                    format!("global.json ({})", path.display())
+                }
+                crate::utils::sdk::VersionSource::DefaultAlias => {
+                    "default managed version".to_string()
+                }
+            };
+
+            print_table_section(
+                "Current .NET SDK",
+                &["Kind", "Version", "Source", "Path"],
+                &[vec![
+                    "managed".to_string(),
+                    version.trim().to_string(),
+                    source,
+                    sdk.root.display().to_string(),
+                ]],
+            );
             return Ok(());
         }
     }
@@ -88,7 +125,16 @@ fn handle_current_command() -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new("dotnet").arg("--version").output()?;
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout);
-        println!("Current system dotnet version: {}", version.trim());
+        print_table_section(
+            "Current .NET SDK",
+            &["Kind", "Version", "Source", "Path"],
+            &[vec![
+                "system".to_string(),
+                version.trim().to_string(),
+                "active PATH resolution".to_string(),
+                "dotnet".to_string(),
+            ]],
+        );
         return Ok(());
     }
 
@@ -108,38 +154,186 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
         .map(|selection| selection.requested_version);
     let default_version = crate::utils::sdk::get_default_version()?;
 
-    if managed_sdks.is_empty() {
-        println!("Managed .NET SDK versions:");
-        println!("  none");
-        println!("  Tip: run 'dver install 8.0.406' to install one.");
+    let managed_rows = if managed_sdks.is_empty() {
+        vec![vec![
+            "none".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ]]
     } else {
-        println!("Managed .NET SDK versions:");
-        for sdk in managed_sdks {
-            let mut markers = Vec::new();
-            if selected_version.as_deref() == Some(&sdk.version) {
-                markers.push("selected");
-            }
-            if default_version.as_deref() == Some(&sdk.version) {
-                markers.push("default");
-            }
+        managed_sdks
+            .into_iter()
+            .map(|sdk| {
+                let mut markers = Vec::new();
+                if selected_version.as_deref() == Some(&sdk.version) {
+                    markers.push("selected");
+                }
+                if default_version.as_deref() == Some(&sdk.version) {
+                    markers.push("default");
+                }
 
-            if markers.is_empty() {
-                println!("  {}", sdk.version);
-            } else {
-                println!("  {} [{}]", sdk.version, markers.join(", "));
-            }
-        }
+                vec![
+                    sdk.version,
+                    if markers.is_empty() {
+                        "-".to_string()
+                    } else {
+                        markers.join(", ")
+                    },
+                    "dver".to_string(),
+                    sdk.root.display().to_string(),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+    print_table_section(
+        "Managed .NET SDK versions",
+        &["Version", "Status", "Owner", "Location"],
+        &managed_rows,
+    );
+
+    if managed_rows.len() == 1 && managed_rows[0][0] == "none" {
+        println!("Tip: run 'dver install 8.0.406' to install one.");
     }
 
     println!();
-    println!("System/global .NET SDK versions:");
-    if system_sdks.is_empty() {
-        println!("  none detected");
+    let system_rows = if system_sdks.is_empty() {
+        vec![vec!["none detected".to_string(), "-".to_string()]]
     } else {
-        for sdk in system_sdks {
-            println!("  {} ({})", sdk.version, sdk.location.display());
+        system_sdks
+            .into_iter()
+            .map(|sdk| vec![sdk.version, sdk.location.display().to_string()])
+            .collect::<Vec<_>>()
+    };
+    print_table_section(
+        "System/global .NET SDK versions",
+        &["Version", "Location"],
+        &system_rows,
+    );
+
+    Ok(())
+}
+
+fn print_table_section(title: &str, headers: &[&str], rows: &[Vec<String>]) {
+    let table = build_table(headers, rows);
+    println!(
+        "{}",
+        color(&center_text(title, table.width), TableStyle::Title)
+    );
+    for line in table.lines {
+        println!("{line}");
+    }
+}
+
+fn build_table(headers: &[&str], rows: &[Vec<String>]) -> TableRender {
+    let mut widths = headers
+        .iter()
+        .map(|header| header.len())
+        .collect::<Vec<_>>();
+
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            if index >= widths.len() {
+                widths.push(cell.len());
+            } else {
+                widths[index] = widths[index].max(cell.len());
+            }
         }
     }
 
-    Ok(())
+    let separator = build_separator(&widths);
+    let mut lines = Vec::new();
+    lines.push(color(&separator, TableStyle::Border));
+    lines.push(build_row(
+        headers.iter().map(|value| value.to_string()).collect(),
+        &widths,
+        true,
+    ));
+    lines.push(color(&separator, TableStyle::Border));
+    for row in rows {
+        lines.push(build_row(row.clone(), &widths, false));
+    }
+    lines.push(color(&separator, TableStyle::Border));
+
+    TableRender {
+        width: separator.len(),
+        lines,
+    }
+}
+
+fn build_separator(widths: &[usize]) -> String {
+    let mut separator = String::from("+");
+    for width in widths {
+        separator.push_str(&"-".repeat(*width + 2));
+        separator.push('+');
+    }
+    separator
+}
+
+fn build_row(cells: Vec<String>, widths: &[usize], is_header: bool) -> String {
+    let mut row = color("|", TableStyle::Border);
+    for (index, width) in widths.iter().enumerate() {
+        let cell = cells.get(index).map(String::as_str).unwrap_or("");
+        let padded = format!("{cell:<width$}", width = *width);
+        let styled_cell = if is_header {
+            color(&padded, TableStyle::Header)
+        } else {
+            color_cell(index, cell, &padded)
+        };
+
+        row.push(' ');
+        row.push_str(&styled_cell);
+        row.push(' ');
+        row.push_str(&color("|", TableStyle::Border));
+    }
+    row
+}
+
+fn color_cell(index: usize, raw: &str, padded: &str) -> String {
+    if raw == "none" || raw == "none detected" || raw == "-" {
+        return color(padded, TableStyle::Dim);
+    }
+
+    if index == 1 && raw.contains("selected") {
+        return color(padded, TableStyle::Highlight);
+    }
+
+    color(padded, TableStyle::Cell)
+}
+
+fn center_text(text: &str, width: usize) -> String {
+    if text.len() >= width {
+        return text.to_string();
+    }
+
+    let left_padding = (width - text.len()) / 2;
+    format!("{}{}", " ".repeat(left_padding), text)
+}
+
+struct TableRender {
+    width: usize,
+    lines: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum TableStyle {
+    Title,
+    Header,
+    Border,
+    Cell,
+    Highlight,
+    Dim,
+}
+
+fn color(value: &str, style: TableStyle) -> String {
+    let code = match style {
+        TableStyle::Title => "1;96",
+        TableStyle::Header => "1;97",
+        TableStyle::Border => "96",
+        TableStyle::Cell => "37",
+        TableStyle::Highlight => "1;92",
+        TableStyle::Dim => "90",
+    };
+
+    format!("\x1b[{code}m{value}\x1b[0m")
 }
