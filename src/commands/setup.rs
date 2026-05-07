@@ -162,8 +162,20 @@ pub fn remove_setup() -> Result<(), Box<dyn std::error::Error>> {
     remove_configuration()?;
 
     let shims_removed = if shims_dir.exists() {
-        fs::remove_dir_all(&shims_dir)?;
-        true
+        match fs::remove_dir_all(&shims_dir) {
+            Ok(()) => true,
+            Err(error) if is_locked_file_error(&error) => {
+                return Err(format!(
+                    "Could not remove shim directory {} because a file inside is locked \
+                     (often a 'dotnet' shim still in use by another shell). \
+                     Close any open terminals or processes using dver, then re-run \
+                     'dver setup --remove'. Underlying error: {error}",
+                    shims_dir.display()
+                )
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        }
     } else {
         false
     };
@@ -688,6 +700,22 @@ fn remove_config_block(existing: &str) -> String {
     }
 
     result
+}
+
+fn is_locked_file_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED = 5, ERROR_SHARING_VIOLATION = 32, ERROR_LOCK_VIOLATION = 33
+        if let Some(code) = error.raw_os_error() {
+            return matches!(code, 5 | 32 | 33);
+        }
+    }
+
+    false
 }
 
 #[cfg(all(test, unix))]
