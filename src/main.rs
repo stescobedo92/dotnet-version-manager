@@ -58,12 +58,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             version,
             version_flag,
             all,
+            force,
         } => {
             let request = version.clone().or_else(|| version_flag.clone());
-            commands::uninstall::handle_uninstall(request, *all).await?;
+            commands::uninstall::handle_uninstall(request, *all, *force).await?;
         }
         Commands::Doctor => {
             commands::doctor::run_doctor_checks()?;
+        }
+        Commands::LsRemote { lts, all } => {
+            commands::ls_remote::handle_ls_remote(*lts, *all).await?;
         }
         Commands::Setup => {
             commands::setup::move_to_top_of_path()?;
@@ -156,6 +160,7 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
 
     let managed_rows = if managed_sdks.is_empty() {
         vec![vec![
+            " ".to_string(),
             "none".to_string(),
             "-".to_string(),
             "-".to_string(),
@@ -173,7 +178,14 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
                     markers.push("default");
                 }
 
+                let arrow = if selected_version.as_deref() == Some(&sdk.version) {
+                    "->"
+                } else {
+                    "  "
+                };
+
                 vec![
+                    arrow.to_string(),
                     sdk.version,
                     if markers.is_empty() {
                         "-".to_string()
@@ -188,7 +200,7 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
     };
     print_table_section(
         "Managed .NET SDK versions",
-        &["Version", "Status", "Owner", "Location"],
+        &["", "Version", "Status", "Owner", "Location"],
         &managed_rows,
     );
 
@@ -289,12 +301,12 @@ fn build_row(cells: Vec<String>, widths: &[usize], is_header: bool) -> String {
     row
 }
 
-fn color_cell(index: usize, raw: &str, padded: &str) -> String {
+fn color_cell(_index: usize, raw: &str, padded: &str) -> String {
     if raw == "none" || raw == "none detected" || raw == "-" {
         return color(padded, TableStyle::Dim);
     }
 
-    if index == 1 && raw.contains("selected") {
+    if raw == "->" || raw.contains("selected") {
         return color(padded, TableStyle::Highlight);
     }
 
