@@ -1,6 +1,7 @@
 use crate::utils::sdk::list_managed_sdks;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::time::Duration;
 
 const RELEASES_INDEX_URL: &str =
     "https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json";
@@ -26,7 +27,7 @@ struct Channel {
 }
 
 pub async fn handle_ls_remote(lts_only: bool, include_eol: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let installed_sdks = list_managed_sdks().unwrap_or_default();
+    let installed_sdks = list_managed_sdks()?;
     let installed_majors: HashSet<String> = installed_sdks
         .iter()
         .filter_map(|sdk| sdk.version.split('.').next().map(str::to_string))
@@ -38,6 +39,7 @@ pub async fn handle_ls_remote(lts_only: bool, include_eol: bool) -> Result<(), B
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("dver/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
         .build()?;
     let response = client.get(RELEASES_INDEX_URL).send().await?;
     if !response.status().is_success() {

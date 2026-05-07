@@ -247,13 +247,19 @@ fn detect_installed_version(install_dir: &Path) -> Result<String, Box<dyn std::e
     }
 
     let mut versions = Vec::new();
-    for entry in fs::read_dir(sdk_dir)? {
+    for entry in fs::read_dir(&sdk_dir)? {
         let entry = entry?;
         if !entry.path().is_dir() {
             continue;
         }
 
-        let Some(version) = entry.file_name().to_str().map(str::to_string) else {
+        let file_name = entry.file_name();
+        let Some(version) = file_name.to_str().map(str::to_string) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                sdk_dir.display(),
+                file_name
+            );
             continue;
         };
         versions.push(version);
@@ -307,10 +313,9 @@ fn track_install_progress(progress: &ProgressBar, line: &str) {
         if progress.position() < 4 {
             progress.set_position(4);
         }
-    } else if normalized.contains("Installed version is") {
+    } else if let Some(idx) = lower.find("installed version is") {
         let version = normalized
-            .split("Installed version is")
-            .nth(1)
+            .get(idx + "installed version is".len()..)
             .map(str::trim)
             .unwrap_or_default();
         progress.set_message(format!("Installed SDK {}", version));

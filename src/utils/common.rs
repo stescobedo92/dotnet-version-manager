@@ -76,3 +76,7 @@ pub fn compare_versions_desc(left: &str, right: &str) -> std::cmp::Ordering {
 pub fn current_working_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(env::current_dir()?)
 }
+
+pub fn display_width(value: &str) -> usize {
+    value.chars().count()
+}

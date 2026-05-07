@@ -54,7 +54,13 @@ pub fn list_managed_sdks() -> Result<Vec<ManagedSdk>, Box<dyn std::error::Error>
             continue;
         }
 
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str().map(str::to_string) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                versions_dir.display(),
+                file_name
+            );
             continue;
         };
 
@@ -299,7 +305,13 @@ fn collect_sdks_from_directory(
             continue;
         }
 
-        let Some(version) = entry.file_name().to_str().map(normalize_version_input) else {
+        let file_name = entry.file_name();
+        let Some(version) = file_name.to_str().map(normalize_version_input) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                sdk_dir.display(),
+                file_name
+            );
             continue;
         };
 

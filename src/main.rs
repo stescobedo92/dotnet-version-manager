@@ -6,6 +6,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use std::path::Path;
 use std::process::Command;
+use utils::common::display_width;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -240,15 +241,16 @@ fn print_table_section(title: &str, headers: &[&str], rows: &[Vec<String>]) {
 fn build_table(headers: &[&str], rows: &[Vec<String>]) -> TableRender {
     let mut widths = headers
         .iter()
-        .map(|header| header.len())
+        .map(|header| display_width(header))
         .collect::<Vec<_>>();
 
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
+            let width = display_width(cell);
             if index >= widths.len() {
-                widths.push(cell.len());
+                widths.push(width);
             } else {
-                widths[index] = widths[index].max(cell.len());
+                widths[index] = widths[index].max(width);
             }
         }
     }
@@ -314,11 +316,12 @@ fn color_cell(_index: usize, raw: &str, padded: &str) -> String {
 }
 
 fn center_text(text: &str, width: usize) -> String {
-    if text.len() >= width {
+    let text_width = display_width(text);
+    if text_width >= width {
         return text.to_string();
     }
 
-    let left_padding = (width - text.len()) / 2;
+    let left_padding = (width - text_width) / 2;
     format!("{}{}", " ".repeat(left_padding), text)
 }
 
