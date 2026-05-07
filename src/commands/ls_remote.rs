@@ -26,14 +26,12 @@ struct Channel {
 }
 
 pub async fn handle_ls_remote(lts_only: bool, include_eol: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let installed_majors: HashSet<String> = list_managed_sdks()
-        .unwrap_or_default()
+    let installed_sdks = list_managed_sdks().unwrap_or_default();
+    let installed_majors: HashSet<String> = installed_sdks
         .iter()
         .filter_map(|sdk| sdk.version.split('.').next().map(str::to_string))
         .collect();
-
-    let installed_exact: HashSet<String> = list_managed_sdks()
-        .unwrap_or_default()
+    let installed_exact: HashSet<String> = installed_sdks
         .into_iter()
         .map(|sdk| sdk.version)
         .collect();
