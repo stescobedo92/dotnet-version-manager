@@ -52,5 +52,9 @@ pub enum Commands {
     /// Diagnose PATH and SDK resolution issues
     Doctor,
     /// Create the dver dotnet shim and add it to PATH
-    Setup,
+    Setup {
+        /// Undo what `dver setup` did: remove the PATH entry, PowerShell profile hook, and shim directory
+        #[arg(long)]
+        remove: bool,
+    },
 }
