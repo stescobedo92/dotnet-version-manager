@@ -23,20 +23,21 @@ pub async fn handle_uninstall(
         .map(|selection| selection.requested_version);
 
     if !force {
-        let mut reasons = Vec::new();
-        if selected_version.as_deref() == Some(&sdk.version) {
-            reasons.push("selected by the current global.json or default");
-        }
-        if default_version.as_deref() == Some(&sdk.version) {
-            reasons.push("the default managed SDK");
-        }
+        let is_selected = selected_version.as_deref() == Some(&sdk.version);
+        let is_default = default_version.as_deref() == Some(&sdk.version);
 
-        if !reasons.is_empty() {
+        let reason = match (is_selected, is_default) {
+            (true, true) => Some("currently active and the default managed SDK"),
+            (true, false) => Some("currently active (selected by global.json)"),
+            (false, true) => Some("the default managed SDK"),
+            (false, false) => None,
+        };
+
+        if let Some(reason) = reason {
             return Err(format!(
                 "Refusing to uninstall {} because it is {}. \
                  Switch with 'dver use <other>' first, or pass --force.",
-                sdk.version,
-                reasons.join(" and ")
+                sdk.version, reason
             )
             .into());
         }

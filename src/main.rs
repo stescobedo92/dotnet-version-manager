@@ -159,7 +159,8 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
         .map(|selection| selection.requested_version);
     let default_version = crate::utils::sdk::get_default_version()?;
 
-    let managed_rows = if managed_sdks.is_empty() {
+    let no_managed_sdks = managed_sdks.is_empty();
+    let managed_rows = if no_managed_sdks {
         vec![vec![
             " ".to_string(),
             "none".to_string(),
@@ -205,7 +206,7 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
         &managed_rows,
     );
 
-    if managed_rows.len() == 1 && managed_rows[0][0] == "none" {
+    if no_managed_sdks {
         println!("Tip: run 'dver install 8.0.406' to install one.");
     }
 

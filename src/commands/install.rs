@@ -24,8 +24,8 @@ pub async fn handle_install(
     let installed_version = downloader::install_sdk(request).await?;
     setup::ensure_shims_exist()?;
 
-    let was_first_install = get_default_version()?.is_none();
-    if was_first_install {
+    let no_default_was_set = get_default_version()?.is_none();
+    if no_default_was_set {
         set_default_version(&installed_version)?;
         println!("Default managed version set to {installed_version}.");
     }
@@ -41,7 +41,7 @@ pub async fn handle_install(
              '{installed_version}' also works)"
         );
     }
-    if was_first_install {
+    if no_default_was_set {
         println!("  dver setup                      # let dver provide the active 'dotnet' command");
     }
 

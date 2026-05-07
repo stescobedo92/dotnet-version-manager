@@ -399,6 +399,8 @@ mod tests {
         assert_eq!(resolved.version, "9.0.100");
         let resolved = resolve_managed_sdk_from_list("current", &sdks).unwrap();
         assert_eq!(resolved.version, "9.0.100");
+        let resolved = resolve_managed_sdk_from_list("stable", &sdks).unwrap();
+        assert_eq!(resolved.version, "9.0.100");
     }
 
     #[test]
