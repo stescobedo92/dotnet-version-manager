@@ -54,9 +54,19 @@ pub fn list_managed_sdks() -> Result<Vec<ManagedSdk>, Box<dyn std::error::Error>
             continue;
         }
 
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str().map(str::to_string) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                versions_dir.display(),
+                file_name
+            );
             continue;
         };
+
+        if name.starts_with('.') {
+            continue;
+        }
 
         if !managed_dotnet_path(&path).exists() {
             continue;
@@ -97,13 +107,31 @@ fn resolve_managed_sdk_from_list(
     selector: &str,
     sdks: &[ManagedSdk],
 ) -> Result<ManagedSdk, Box<dyn std::error::Error>> {
+    if sdks.is_empty() {
+        return Err(format!(
+            "No managed .NET SDKs are installed. Run 'dver install {selector}' first."
+        )
+        .into());
+    }
+
+    let lower = selector.to_ascii_lowercase();
+    if matches!(lower.as_str(), "latest" | "current" | "stable") {
+        return Ok(sdks[0].clone());
+    }
+
     if let Some(exact) = sdks.iter().find(|sdk| sdk.version == selector) {
         return Ok(exact.clone());
     }
 
+    let prefix = if !selector.is_empty() && selector.chars().all(|c| c.is_ascii_digit()) {
+        format!("{selector}.")
+    } else {
+        selector.to_string()
+    };
+
     let matches: Vec<_> = sdks
         .iter()
-        .filter(|sdk| sdk.version.starts_with(selector))
+        .filter(|sdk| sdk.version.starts_with(&prefix))
         .cloned()
         .collect();
 
@@ -277,7 +305,13 @@ fn collect_sdks_from_directory(
             continue;
         }
 
-        let Some(version) = entry.file_name().to_str().map(normalize_version_input) else {
+        let file_name = entry.file_name();
+        let Some(version) = file_name.to_str().map(normalize_version_input) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                sdk_dir.display(),
+                file_name
+            );
             continue;
         };
 
@@ -349,5 +383,29 @@ mod tests {
         let sdks = vec![sdk("8.0.406"), sdk("8.0.407")];
         let err = resolve_managed_sdk_from_list("8.0", &sdks).unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn bare_major_matches_only_that_major() {
+        let sdks = vec![sdk("9.0.100"), sdk("8.0.406")];
+        let resolved = resolve_managed_sdk_from_list("8", &sdks).unwrap();
+        assert_eq!(resolved.version, "8.0.406");
+    }
+
+    #[test]
+    fn latest_alias_picks_first_entry() {
+        let sdks = vec![sdk("9.0.100"), sdk("8.0.406")];
+        let resolved = resolve_managed_sdk_from_list("latest", &sdks).unwrap();
+        assert_eq!(resolved.version, "9.0.100");
+        let resolved = resolve_managed_sdk_from_list("current", &sdks).unwrap();
+        assert_eq!(resolved.version, "9.0.100");
+        let resolved = resolve_managed_sdk_from_list("stable", &sdks).unwrap();
+        assert_eq!(resolved.version, "9.0.100");
+    }
+
+    #[test]
+    fn empty_list_returns_helpful_error() {
+        let err = resolve_managed_sdk_from_list("8.0", &[]).unwrap_err();
+        assert!(err.to_string().contains("No managed"));
     }
 }

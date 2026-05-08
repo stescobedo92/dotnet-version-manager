@@ -212,22 +212,18 @@ fn run_install_script(
 #[cfg(windows)]
 fn build_windows_install_command(script_path: &Path) -> Command {
     let mut command = if executable_exists("pwsh") {
-        let mut command = Command::new("pwsh");
-        command
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass");
-        command
+        Command::new("pwsh")
     } else {
-        let mut command = Command::new("powershell");
-        command
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass");
-        command
+        Command::new("powershell")
     };
 
-    command.arg("-File").arg(script_path);
+    command
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(script_path);
     command
 }
 
@@ -251,13 +247,19 @@ fn detect_installed_version(install_dir: &Path) -> Result<String, Box<dyn std::e
     }
 
     let mut versions = Vec::new();
-    for entry in fs::read_dir(sdk_dir)? {
+    for entry in fs::read_dir(&sdk_dir)? {
         let entry = entry?;
         if !entry.path().is_dir() {
             continue;
         }
 
-        let Some(version) = entry.file_name().to_str().map(str::to_string) else {
+        let file_name = entry.file_name();
+        let Some(version) = file_name.to_str().map(str::to_string) else {
+            eprintln!(
+                "warning: skipping non-UTF-8 directory entry under {}: {:?}",
+                sdk_dir.display(),
+                file_name
+            );
             continue;
         };
         versions.push(version);
@@ -292,21 +294,32 @@ fn create_install_progress_bar() -> ProgressBar {
 
 fn track_install_progress(progress: &ProgressBar, line: &str) {
     let normalized = line.trim();
+    let lower = normalized.to_ascii_lowercase();
 
-    if normalized.contains("Downloaded file") {
+    if lower.contains("downloaded file") {
         progress.set_position(3);
         progress.set_message(downloaded_message(normalized));
-    } else if normalized.contains("Extracting the archive") {
+    } else if lower.starts_with("downloading") || lower.contains("downloading link") {
+        if progress.position() < 3 {
+            progress.set_position(3);
+        }
+        progress.set_message("Downloading SDK archive");
+    } else if lower.contains("extracting") {
         progress.set_position(4);
         progress.set_message("Extracting SDK archive");
-    } else if normalized.contains("Installed version is") {
+    } else if lower.contains("adding to current process path")
+        || lower.contains("adding to user path")
+    {
+        if progress.position() < 4 {
+            progress.set_position(4);
+        }
+    } else if let Some(idx) = lower.find("installed version is") {
         let version = normalized
-            .split("Installed version is")
-            .nth(1)
+            .get(idx + "installed version is".len()..)
             .map(str::trim)
             .unwrap_or_default();
         progress.set_message(format!("Installed SDK {}", version));
-    } else if normalized.contains("Installation finished") {
+    } else if lower.contains("installation finished") {
         progress.set_position(5);
         progress.set_message("Installer finished successfully");
     }
@@ -330,10 +343,12 @@ fn should_surface_line(line: &str, is_stderr: bool) -> bool {
 }
 
 fn is_important_line(line: &str) -> bool {
-    line.contains("Downloaded file")
-        || line.contains("Extracting the archive")
-        || line.contains("Installed version is")
-        || line.contains("Installation finished")
-        || line.contains("Error")
-        || line.contains("Warning")
+    let lower = line.to_ascii_lowercase();
+    lower.contains("downloaded file")
+        || lower.starts_with("downloading")
+        || lower.contains("extracting")
+        || lower.contains("installed version is")
+        || lower.contains("installation finished")
+        || lower.contains("error")
+        || lower.contains("warning")
 }

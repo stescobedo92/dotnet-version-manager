@@ -1,13 +1,15 @@
 use crate::commands::setup;
-use crate::utils::common::{get_dver_root, get_versions_dir};
+use crate::utils::common::{current_working_dir, get_dver_root, get_versions_dir};
 use crate::utils::sdk::{
     clear_default_version, get_default_version, list_managed_sdks, resolve_managed_sdk,
+    resolve_version_selection,
 };
 use std::fs;
 
 pub async fn handle_uninstall(
     version: Option<String>,
     all: bool,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if all {
         return uninstall_all();
@@ -17,6 +19,29 @@ pub async fn handle_uninstall(
         .ok_or("Please provide a version to uninstall, for example: dver uninstall 8.0.406")?;
     let sdk = resolve_managed_sdk(&version)?;
     let default_version = get_default_version()?;
+    let selected_version = resolve_version_selection(&current_working_dir()?)?
+        .map(|selection| selection.requested_version);
+
+    if !force {
+        let is_selected = selected_version.as_deref() == Some(&sdk.version);
+        let is_default = default_version.as_deref() == Some(&sdk.version);
+
+        let reason = match (is_selected, is_default) {
+            (true, true) => Some("currently active and the default managed SDK"),
+            (true, false) => Some("currently active (selected by global.json)"),
+            (false, true) => Some("the default managed SDK"),
+            (false, false) => None,
+        };
+
+        if let Some(reason) = reason {
+            return Err(format!(
+                "Refusing to uninstall {} because it is {}. \
+                 Switch with 'dver use <other>' first, or pass --force.",
+                sdk.version, reason
+            )
+            .into());
+        }
+    }
 
     fs::remove_dir_all(&sdk.root)?;
     println!("Removed managed .NET SDK {}.", sdk.version);

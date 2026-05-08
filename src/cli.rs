@@ -15,7 +15,7 @@ pub enum Commands {
     List,
     /// Select a managed SDK version
     Use {
-        /// Managed SDK version to select
+        /// Managed SDK version, prefix, or alias: 8.0.406, 8.0, 8, latest
         version: Option<String>,
         /// Set the default managed version instead of writing a local global.json
         #[arg(long, short)]
@@ -26,7 +26,7 @@ pub enum Commands {
     },
     /// Install a managed .NET SDK version or channel
     Install {
-        /// Version or channel to install, for example 8.0.406, 8.0, STS
+        /// Version, channel, or alias: 8.0.406, 8.0, 8, lts, sts, latest
         version: Option<String>,
         /// Backward-compatible alias for the positional version argument
         #[arg(long = "version", hide = true)]
@@ -48,9 +48,22 @@ pub enum Commands {
         /// Remove every managed SDK version and dver PATH configuration
         #[arg(long)]
         all: bool,
+        /// Bypass the safety check that refuses to remove the active or default SDK
+        #[arg(long, short)]
+        force: bool,
     },
     /// Diagnose PATH and SDK resolution issues
     Doctor,
+    /// List installable .NET SDK channels from the official release index
+    #[command(name = "ls-remote")]
+    LsRemote {
+        /// Show only LTS channels
+        #[arg(long)]
+        lts: bool,
+        /// Include channels whose support phase is "eol"
+        #[arg(long)]
+        all: bool,
+    },
     /// Create the dver dotnet shim and add it to PATH
     Setup,
 }

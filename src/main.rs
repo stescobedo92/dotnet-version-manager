@@ -6,6 +6,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use std::path::Path;
 use std::process::Command;
+use utils::common::display_width;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,12 +59,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             version,
             version_flag,
             all,
+            force,
         } => {
             let request = version.clone().or_else(|| version_flag.clone());
-            commands::uninstall::handle_uninstall(request, *all).await?;
+            commands::uninstall::handle_uninstall(request, *all, *force).await?;
         }
         Commands::Doctor => {
             commands::doctor::run_doctor_checks()?;
+        }
+        Commands::LsRemote { lts, all } => {
+            commands::ls_remote::handle_ls_remote(*lts, *all).await?;
         }
         Commands::Setup => {
             commands::setup::move_to_top_of_path()?;
@@ -154,8 +159,10 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
         .map(|selection| selection.requested_version);
     let default_version = crate::utils::sdk::get_default_version()?;
 
-    let managed_rows = if managed_sdks.is_empty() {
+    let no_managed_sdks = managed_sdks.is_empty();
+    let managed_rows = if no_managed_sdks {
         vec![vec![
+            " ".to_string(),
             "none".to_string(),
             "-".to_string(),
             "-".to_string(),
@@ -173,7 +180,14 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
                     markers.push("default");
                 }
 
+                let arrow = if selected_version.as_deref() == Some(&sdk.version) {
+                    "->"
+                } else {
+                    "  "
+                };
+
                 vec![
+                    arrow.to_string(),
                     sdk.version,
                     if markers.is_empty() {
                         "-".to_string()
@@ -188,11 +202,11 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
     };
     print_table_section(
         "Managed .NET SDK versions",
-        &["Version", "Status", "Owner", "Location"],
+        &["", "Version", "Status", "Owner", "Location"],
         &managed_rows,
     );
 
-    if managed_rows.len() == 1 && managed_rows[0][0] == "none" {
+    if no_managed_sdks {
         println!("Tip: run 'dver install 8.0.406' to install one.");
     }
 
@@ -228,15 +242,16 @@ fn print_table_section(title: &str, headers: &[&str], rows: &[Vec<String>]) {
 fn build_table(headers: &[&str], rows: &[Vec<String>]) -> TableRender {
     let mut widths = headers
         .iter()
-        .map(|header| header.len())
+        .map(|header| display_width(header))
         .collect::<Vec<_>>();
 
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
+            let width = display_width(cell);
             if index >= widths.len() {
-                widths.push(cell.len());
+                widths.push(width);
             } else {
-                widths[index] = widths[index].max(cell.len());
+                widths[index] = widths[index].max(width);
             }
         }
     }
@@ -289,12 +304,12 @@ fn build_row(cells: Vec<String>, widths: &[usize], is_header: bool) -> String {
     row
 }
 
-fn color_cell(index: usize, raw: &str, padded: &str) -> String {
+fn color_cell(_index: usize, raw: &str, padded: &str) -> String {
     if raw == "none" || raw == "none detected" || raw == "-" {
         return color(padded, TableStyle::Dim);
     }
 
-    if index == 1 && raw.contains("selected") {
+    if raw == "->" || raw.contains("selected") {
         return color(padded, TableStyle::Highlight);
     }
 
@@ -302,11 +317,12 @@ fn color_cell(index: usize, raw: &str, padded: &str) -> String {
 }
 
 fn center_text(text: &str, width: usize) -> String {
-    if text.len() >= width {
+    let text_width = display_width(text);
+    if text_width >= width {
         return text.to_string();
     }
 
-    let left_padding = (width - text.len()) / 2;
+    let left_padding = (width - text_width) / 2;
     format!("{}{}", " ".repeat(left_padding), text)
 }
 
