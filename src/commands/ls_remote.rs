@@ -52,7 +52,7 @@ pub async fn handle_ls_remote(lts_only: bool, include_eol: bool) -> Result<(), B
     let index: Index = response.json().await?;
 
     println!(
-        "{:<3} {:<8} {:<32} {:<6} {:<8} {:<12}",
+        "{:<3} {:<8} {:<32} {:<6} {:<13} {:<12}",
         "", "Channel", "Latest SDK", "Type", "Phase", "EOL"
     );
 
@@ -74,7 +74,7 @@ pub async fn handle_ls_remote(lts_only: bool, include_eol: bool) -> Result<(), B
         };
 
         println!(
-            "{:<3} {:<8} {:<32} {:<6} {:<8} {:<12}",
+            "{:<3} {:<8} {:<32} {:<6} {:<13} {:<12}",
             marker,
             channel.channel_version,
             channel.latest_sdk,
