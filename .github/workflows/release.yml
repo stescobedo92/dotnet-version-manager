@@ -80,7 +80,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
         run: |
-          status=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/${CRATE_NAME}/${VERSION}")
+          # crates.io rejects the default curl user-agent with 403.
+          status=$(curl -s -o /dev/null -w '%{http_code}' -A "${CRATE_NAME}-release-workflow" "https://crates.io/api/v1/crates/${CRATE_NAME}/${VERSION}")
           if [ "$status" = "200" ]; then
             echo "${CRATE_NAME} ${VERSION} is already published on crates.io; skipping."
             exit 0
@@ -189,12 +190,9 @@ jobs:
         if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
         run: sudo snap install snapcraft --classic
 
-      - name: Authenticate with Snap Store
-        if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
-        run: |
-          printf '%s' "$SNAPCRAFT_STORE_CREDENTIALS" > snapcraft.login
-          snapcraft login --with snapcraft.login
-
+      # Modern snapcraft removed 'login --with'; it reads the
+      # SNAPCRAFT_STORE_CREDENTIALS env var (output of
+      # 'snapcraft export-login -') directly during upload.
       - name: Publish snap
         if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
         env:
