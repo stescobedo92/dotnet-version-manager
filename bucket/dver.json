@@ -1,0 +1,26 @@
+{
+  "version": "0.4.0",
+  "description": "CLI tool for managing .NET SDK versions, including installation and version switching.",
+  "homepage": "https://github.com/stescobedo92/dotnet-version-manager",
+  "license": "MIT OR Apache-2.0",
+  "notes": [
+    "Run 'dver setup' in a new PowerShell session after installation."
+  ],
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/stescobedo92/dotnet-version-manager/releases/download/v0.4.0/dver-0.4.0-x86_64-pc-windows-msvc.zip",
+      "hash": "e45d49d5d0bab644b05d5e89f7cf9ce2268214086fd7101e6d746ff883511555"
+    }
+  },
+  "bin": "dver.exe",
+  "checkver": {
+    "github": "https://github.com/stescobedo92/dotnet-version-manager"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/stescobedo92/dotnet-version-manager/releases/download/v$version/dver-$version-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}
