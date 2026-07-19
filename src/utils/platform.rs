@@ -6,18 +6,23 @@ pub fn path_separator() -> char {
     }
 }
 
-pub fn install_script_url() -> &'static str {
-    if cfg!(windows) {
-        "https://dot.net/v1/dotnet-install.ps1"
+/// RID used by Microsoft release metadata (e.g. win-x64, linux-arm64, osx-arm64).
+pub fn dotnet_rid() -> String {
+    let os = if cfg!(windows) {
+        "win"
+    } else if cfg!(target_os = "macos") {
+        "osx"
     } else {
-        "https://dot.net/v1/dotnet-install.sh"
-    }
-}
+        "linux"
+    };
 
-pub fn install_script_file_name() -> &'static str {
-    if cfg!(windows) {
-        "dotnet-install.ps1"
-    } else {
-        "dotnet-install.sh"
-    }
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "x86",
+        "arm" => "arm",
+        other => other,
+    };
+
+    format!("{os}-{arch}")
 }

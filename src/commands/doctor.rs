@@ -5,12 +5,12 @@ use crate::utils::common::{
 };
 use crate::utils::platform::path_separator;
 use crate::utils::sdk::{
-    find_nearest_global_json, get_default_version, list_managed_sdks, read_global_json_version,
-    resolve_version_selection, VersionSource,
+    find_duplicated_versions, find_nearest_global_json, get_default_version, list_managed_sdks,
+    read_global_json_version, resolve_managed_sdk, resolve_version_selection, VersionSource,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ pub fn run_doctor_checks() -> Result<(), Box<dyn std::error::Error>> {
 
     print_header("dver doctor");
 
-    let progress = ProgressBar::new(5);
+    let progress = ProgressBar::new(7);
     progress.set_style(
         ProgressStyle::with_template("{spinner:.cyan} [{bar:24.cyan/blue}] {pos}/{len} {msg}")
             .expect("valid doctor progress template")
@@ -48,9 +48,16 @@ pub fn run_doctor_checks() -> Result<(), Box<dyn std::error::Error>> {
     diagnostics.push(check_shell_hook(&shims_dir));
 
     progress.set_position(5);
-    progress.set_message("Inspecting active dotnet and resolved SDK");
+    progress.set_message("Inspecting active dotnet");
     diagnostics.push(check_active_dotnet(&shims_dir));
-    diagnostics.push(check_resolved_sdk(&current_dir, &dver_root)?);
+
+    progress.set_position(6);
+    progress.set_message("Inspecting resolved SDK");
+    diagnostics.push(check_resolved_sdk(&current_dir)?);
+
+    progress.set_position(7);
+    progress.set_message("Checking for duplicated installations");
+    diagnostics.push(check_duplicated_installs()?);
 
     progress.finish_and_clear();
 
@@ -134,6 +141,23 @@ fn check_version_selection(
             Some(version) => {
                 details.push(format!("nearest global.json: {}", global_json.display()));
                 details.push(format!("requested SDK version: {version}"));
+
+                // A global.json in the home directory (or any ancestor far above
+                // the project) silently pins every project under it.
+                if is_home_level_global_json(&global_json) {
+                    return Ok(Diagnostic::new(
+                        "Version selection",
+                        DiagnosticStatus::Warn,
+                        format!(
+                            "A global.json in your home directory is pinning SDK {version} for ALL projects."
+                        ),
+                        details,
+                    )
+                    .with_hint(
+                        "Move it into the specific project or delete it: it overrides every repository below your home directory.",
+                    ));
+                }
+
                 return Ok(Diagnostic::new(
                     "Version selection",
                     DiagnosticStatus::Ok,
@@ -185,7 +209,10 @@ fn check_path(shims_dir: &PathBuf) -> Diagnostic {
 
     let mut details = vec![format!("expected shim dir: {}", shims_dir.display())];
 
-    match path_entries.iter().position(|entry| entry == shims_dir) {
+    match path_entries
+        .iter()
+        .position(|entry| paths_equal(entry, shims_dir))
+    {
         Some(index) if index == 0 => Diagnostic::new(
             "PATH order",
             DiagnosticStatus::Ok,
@@ -198,11 +225,7 @@ fn check_path(shims_dir: &PathBuf) -> Diagnostic {
         Some(index) => {
             let mut diagnostic = Diagnostic::new(
                 "PATH order",
-                if cfg!(windows) {
-                    DiagnosticStatus::Warn
-                } else {
-                    DiagnosticStatus::Warn
-                },
+                DiagnosticStatus::Warn,
                 format!(
                     "dver shims are present, but only at PATH position {}.",
                     index + 1
@@ -285,7 +308,11 @@ fn check_active_dotnet(shims_dir: &PathBuf) -> Diagnostic {
     match resolve_dotnet_on_path() {
         Some(active_dotnet) => {
             details.push(format!("active dotnet: {}", active_dotnet.display()));
-            if active_dotnet.parent() == Some(shims_dir.as_path()) {
+            let active_parent = active_dotnet.parent().map(PathBuf::from);
+            if active_parent
+                .as_ref()
+                .is_some_and(|parent| paths_equal(parent, shims_dir))
+            {
                 Diagnostic::new(
                     "Active dotnet",
                     DiagnosticStatus::Ok,
@@ -293,18 +320,29 @@ fn check_active_dotnet(shims_dir: &PathBuf) -> Diagnostic {
                     details,
                 )
             } else {
-                let diagnostic = Diagnostic::new(
-                    "Active dotnet",
-                    DiagnosticStatus::Warn,
-                    if cfg!(windows) && profile_hook_installed {
-                        "The current shell still resolves dotnet from the system, but new PowerShell tabs should use the dver hook.".to_string()
-                    } else {
-                        "The active dotnet command still comes from the system.".to_string()
-                    },
-                    details,
-                );
+                let competing = detect_competing_manager(&active_dotnet);
+                if let Some(name) = &competing {
+                    details.push(format!("competing manager detected: {name}"));
+                }
 
-                if cfg!(windows) {
+                let summary = if let Some(name) = &competing {
+                    format!(
+                        "The active dotnet command comes from another manager ({name}), not dver."
+                    )
+                } else if cfg!(windows) && profile_hook_installed {
+                    "The current shell still resolves dotnet from the system, but new PowerShell tabs should use the dver hook.".to_string()
+                } else {
+                    "The active dotnet command still comes from the system.".to_string()
+                };
+
+                let diagnostic =
+                    Diagnostic::new("Active dotnet", DiagnosticStatus::Warn, summary, details);
+
+                if competing.is_some() {
+                    diagnostic.with_hint(
+                        "Remove the other manager's shims from PATH or put the dver shims first, then open a new shell.",
+                    )
+                } else if cfg!(windows) {
                     if profile_hook_installed {
                         diagnostic.with_hint(
                             "Close this tab and open a brand-new PowerShell tab. You can verify the hook with `Get-Command dotnet`.",
@@ -331,10 +369,7 @@ fn check_active_dotnet(shims_dir: &PathBuf) -> Diagnostic {
     }
 }
 
-fn check_resolved_sdk(
-    current_dir: &PathBuf,
-    dver_root: &PathBuf,
-) -> Result<Diagnostic, Box<dyn std::error::Error>> {
+fn check_resolved_sdk(current_dir: &PathBuf) -> Result<Diagnostic, Box<dyn std::error::Error>> {
     let mut details = Vec::new();
 
     let Some(selection) = resolve_version_selection(current_dir)? else {
@@ -362,32 +397,121 @@ fn check_resolved_sdk(
         selection.requested_version
     ));
 
-    let managed_root = dver_root
-        .join("versions")
-        .join(&selection.requested_version);
-    if managed_dotnet_path(&managed_root).exists() {
-        details.push(format!("managed SDK root: {}", managed_root.display()));
-        return Ok(Diagnostic::new(
+    match resolve_managed_sdk(&selection.requested_version) {
+        Ok(sdk) => {
+            details.push(format!("resolved version: {}", sdk.version));
+            details.push(format!("managed SDK root: {}", sdk.root.display()));
+            if managed_dotnet_path(&sdk.root).exists() {
+                Ok(Diagnostic::new(
+                    "Resolved SDK",
+                    DiagnosticStatus::Ok,
+                    "The selected SDK exists in the dver managed store.".to_string(),
+                    details,
+                ))
+            } else {
+                Ok(Diagnostic::new(
+                    "Resolved SDK",
+                    DiagnosticStatus::Fail,
+                    format!(
+                        "Managed SDK {} is registered but the dotnet host is missing.",
+                        sdk.version
+                    ),
+                    details,
+                )
+                .with_hint(format!("Reinstall with `dver install {}`.", sdk.version)))
+            }
+        }
+        Err(_) => Ok(Diagnostic::new(
             "Resolved SDK",
-            DiagnosticStatus::Ok,
-            "The selected SDK exists in the dver managed store.".to_string(),
+            DiagnosticStatus::Fail,
+            format!(
+                "The selected SDK {} is not installed under dver.",
+                selection.requested_version
+            ),
             details,
+        )
+        .with_hint(format!(
+            "Run `dver install {}` to install the missing SDK.",
+            selection.requested_version
+        ))),
+    }
+}
+
+fn check_duplicated_installs() -> Result<Diagnostic, Box<dyn std::error::Error>> {
+    let duplicates = find_duplicated_versions()?;
+
+    if duplicates.is_empty() {
+        return Ok(Diagnostic::new(
+            "Duplicated installs",
+            DiagnosticStatus::Ok,
+            "No SDK version is installed both by dver and the system.".to_string(),
+            Vec::new(),
         ));
     }
 
+    let details = duplicates
+        .iter()
+        .map(|version| format!("duplicated version: {version} (dver + system)"))
+        .collect::<Vec<_>>();
+    let first = &duplicates[0];
+
     Ok(Diagnostic::new(
-        "Resolved SDK",
-        DiagnosticStatus::Fail,
+        "Duplicated installs",
+        DiagnosticStatus::Warn,
         format!(
-            "The selected SDK {} is not installed under dver.",
-            selection.requested_version
+            "{} SDK version(s) are installed twice (dver and system).",
+            duplicates.len()
         ),
         details,
     )
     .with_hint(format!(
-        "Run `dver install {}` to install the missing SDK.",
-        selection.requested_version
+        "Keep one copy per version. Example: 'dver uninstall {first}' removes the managed copy, or 'dver uninstall {first} --system' removes the system copy (Administrator terminal required)."
     )))
+}
+
+fn is_home_level_global_json(global_json: &Path) -> bool {
+    let Some(home) = crate::utils::common::get_home_dir() else {
+        return false;
+    };
+    global_json
+        .parent()
+        .is_some_and(|parent| paths_equal(&parent.to_path_buf(), &home))
+}
+
+fn detect_competing_manager(active_dotnet: &PathBuf) -> Option<&'static str> {
+    let haystack = normalize_path_key(active_dotnet);
+    if haystack.contains("\\.dotver\\") || haystack.contains("/.dotver/") {
+        return Some("dotver");
+    }
+    if haystack.contains("\\fnm\\") || haystack.contains("/fnm/") {
+        return Some("fnm");
+    }
+    if haystack.contains("\\nvm\\") || haystack.contains("/nvm/") {
+        return Some("nvm");
+    }
+    None
+}
+
+fn paths_equal(left: &PathBuf, right: &PathBuf) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left_normalized = normalize_path_key(left);
+    let right_normalized = normalize_path_key(right);
+    left_normalized == right_normalized
+}
+
+fn normalize_path_key(path: &PathBuf) -> String {
+    let mut value = path.to_string_lossy().replace('/', "\\");
+    while value.ends_with('\\') || value.ends_with('/') {
+        value.pop();
+    }
+    if cfg!(windows) {
+        value.to_ascii_lowercase()
+    } else {
+        value
+    }
 }
 
 fn resolve_dotnet_on_path() -> Option<PathBuf> {

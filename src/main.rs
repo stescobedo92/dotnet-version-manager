@@ -8,7 +8,14 @@ use std::path::Path;
 use std::process::Command;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os();
     let program_name = args.next();
 
@@ -35,6 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List => {
             handle_list_command()?;
         }
+        Commands::ListRemote => {
+            handle_list_remote_command().await?;
+        }
         Commands::Use {
             version,
             global,
@@ -47,20 +57,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             version_flag,
             channel,
             lts,
+            force,
         } => {
             let request = version
                 .clone()
                 .or_else(|| version_flag.clone())
                 .or_else(|| channel.clone());
-            commands::install::handle_install(*lts, request).await?;
+            commands::install::handle_install(*lts, request, *force).await?;
         }
         Commands::Uninstall {
             version,
             version_flag,
             all,
+            system,
         } => {
             let request = version.clone().or_else(|| version_flag.clone());
-            commands::uninstall::handle_uninstall(request, *all).await?;
+            commands::uninstall::handle_uninstall(request, *all, *system).await?;
         }
         Commands::Doctor => {
             commands::doctor::run_doctor_checks()?;
@@ -90,39 +102,64 @@ fn handle_current_command() -> Result<(), Box<dyn std::error::Error>> {
     let current_dir = crate::utils::common::current_working_dir()?;
 
     if let Some(selection) = crate::utils::sdk::resolve_version_selection(&current_dir)? {
-        let sdk = crate::utils::sdk::resolve_managed_sdk(&selection.requested_version)?;
-        let output = Command::new(crate::utils::common::managed_dotnet_path(&sdk.root))
-            .arg("--version")
-            .env("DOTNET_ROOT", &sdk.root)
-            .env("DOTNET_MULTILEVEL_LOOKUP", "0")
-            .output()?;
+        let source = match &selection.source {
+            crate::utils::sdk::VersionSource::LocalGlobalJson(path) => {
+                format!("global.json ({})", path.display())
+            }
+            crate::utils::sdk::VersionSource::DefaultAlias => "default managed version".to_string(),
+        };
 
-        if output.status.success() {
-            let version = String::from_utf8_lossy(&output.stdout);
-            let source = match selection.source {
-                crate::utils::sdk::VersionSource::LocalGlobalJson(path) => {
-                    format!("global.json ({})", path.display())
-                }
-                crate::utils::sdk::VersionSource::DefaultAlias => {
-                    "default managed version".to_string()
-                }
-            };
+        match crate::utils::sdk::resolve_managed_sdk(&selection.requested_version) {
+            Ok(sdk) => {
+                let output = Command::new(crate::utils::common::managed_dotnet_path(&sdk.root))
+                    .arg("--version")
+                    .env("DOTNET_ROOT", &sdk.root)
+                    .env("DOTNET_MULTILEVEL_LOOKUP", "0")
+                    .output()?;
 
-            print_table_section(
-                "Current .NET SDK",
-                &["Kind", "Version", "Source", "Path"],
-                &[vec![
-                    "managed".to_string(),
-                    version.trim().to_string(),
-                    source,
-                    sdk.root.display().to_string(),
-                ]],
-            );
-            return Ok(());
+                if output.status.success() {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    print_table_section(
+                        "Current .NET SDK",
+                        &["Kind", "Version", "Source", "Path"],
+                        &[vec![
+                            "managed".to_string(),
+                            version.trim().to_string(),
+                            source,
+                            sdk.root.display().to_string(),
+                        ]],
+                    );
+                    return Ok(());
+                }
+            }
+            Err(_) => {
+                print_table_section(
+                    "Current .NET SDK",
+                    &["Kind", "Version", "Source", "Path"],
+                    &[vec![
+                        "missing".to_string(),
+                        selection.requested_version.clone(),
+                        source,
+                        "-".to_string(),
+                    ]],
+                );
+                println!(
+                    "Selected SDK {} is not installed. Run 'dver install {}'.",
+                    selection.requested_version, selection.requested_version
+                );
+                return Ok(());
+            }
         }
     }
 
-    let output = Command::new("dotnet").arg("--version").output()?;
+    let Some(system_dotnet) = crate::utils::sdk::find_system_dotnet_on_path() else {
+        return Err(
+            "No managed SDK is selected and no system dotnet was found on PATH. Run 'dver install <version>'."
+                .into(),
+        );
+    };
+
+    let output = Command::new(&system_dotnet).arg("--version").output()?;
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout);
         print_table_section(
@@ -132,7 +169,7 @@ fn handle_current_command() -> Result<(), Box<dyn std::error::Error>> {
                 "system".to_string(),
                 version.trim().to_string(),
                 "active PATH resolution".to_string(),
-                "dotnet".to_string(),
+                system_dotnet.display().to_string(),
             ]],
         );
         return Ok(());
@@ -154,6 +191,15 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
         .map(|selection| selection.requested_version);
     let default_version = crate::utils::sdk::get_default_version()?;
 
+    let system_versions = system_sdks
+        .iter()
+        .map(|sdk| sdk.version.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let managed_versions = managed_sdks
+        .iter()
+        .map(|sdk| sdk.version.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
     let managed_rows = if managed_sdks.is_empty() {
         vec![vec![
             "none".to_string(),
@@ -171,6 +217,9 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if default_version.as_deref() == Some(&sdk.version) {
                     markers.push("default");
+                }
+                if system_versions.contains(&sdk.version) {
+                    markers.push("also in system");
                 }
 
                 vec![
@@ -198,18 +247,87 @@ fn handle_list_command() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     let system_rows = if system_sdks.is_empty() {
-        vec![vec!["none detected".to_string(), "-".to_string()]]
+        vec![vec![
+            "none detected".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ]]
     } else {
         system_sdks
             .into_iter()
-            .map(|sdk| vec![sdk.version, sdk.location.display().to_string()])
+            .map(|sdk| {
+                let status = if managed_versions.contains(&sdk.version) {
+                    "duplicated by dver".to_string()
+                } else {
+                    "-".to_string()
+                };
+                vec![sdk.version, status, sdk.location.display().to_string()]
+            })
             .collect::<Vec<_>>()
     };
     print_table_section(
         "System/global .NET SDK versions",
-        &["Version", "Location"],
+        &["Version", "Status", "Location"],
         &system_rows,
     );
+
+    let duplicates = crate::utils::sdk::find_duplicated_versions()?;
+    if !duplicates.is_empty() {
+        println!();
+        for version in &duplicates {
+            println!("Duplicate: SDK {version} is installed twice (dver + system). Keep one:");
+            println!("  dver uninstall {version}            removes the dver-managed copy (recommended if you rely on the system install)");
+            println!("  dver uninstall {version} --system   removes the system copy (needs an Administrator terminal)");
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_list_remote_command() -> Result<(), Box<dyn std::error::Error>> {
+    let channels = crate::utils::releases::list_remote_channels().await?;
+    let managed_versions = crate::utils::sdk::list_managed_sdks()?
+        .into_iter()
+        .map(|sdk| sdk.version)
+        .collect::<std::collections::BTreeSet<_>>();
+    let system_versions = crate::utils::sdk::list_system_sdks()?
+        .into_iter()
+        .map(|sdk| sdk.version)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let rows = channels
+        .into_iter()
+        .map(|channel| {
+            let latest_sdk = channel.latest_sdk.unwrap_or_else(|| "-".to_string());
+            let mut markers = Vec::new();
+            if managed_versions.contains(&latest_sdk) {
+                markers.push("installed (dver)");
+            }
+            if system_versions.contains(&latest_sdk) {
+                markers.push("installed (system)");
+            }
+
+            vec![
+                channel.channel,
+                latest_sdk,
+                channel.release_type.unwrap_or_else(|| "-".to_string()),
+                channel.support_phase.unwrap_or_else(|| "-".to_string()),
+                channel.eol_date.unwrap_or_else(|| "-".to_string()),
+                if markers.is_empty() {
+                    "-".to_string()
+                } else {
+                    markers.join(", ")
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    print_table_section(
+        "Available .NET channels (releases-index)",
+        &["Channel", "Latest SDK", "Type", "Phase", "EOL", "Status"],
+        &rows,
+    );
+    println!("Install with: dver install <channel|version>, e.g. dver install 8.0 or dver install 8.0.423");
 
     Ok(())
 }

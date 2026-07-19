@@ -1,26 +1,18 @@
 use crate::commands::setup;
 use crate::utils::downloader::{self, InstallRequest};
-use crate::utils::sdk::{get_default_version, get_managed_sdk, set_default_version};
+use crate::utils::sdk::{get_default_version, set_default_version};
 
 pub async fn handle_install(
     lts: bool,
     version_or_channel: Option<String>,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = resolve_install_request(lts, version_or_channel)?;
 
-    if let InstallRequest::Version(version) = &request {
-        let normalized = crate::utils::common::normalize_version_input(version);
-        if get_managed_sdk(&normalized)?.is_some() {
-            println!("Managed .NET SDK {normalized} is already installed.");
-            println!("Run 'dver use {normalized}' to select it.");
-            return Ok(());
-        }
-    }
-
-    println!("Installing .NET SDK via the official dotnet installer...");
+    println!("Installing .NET SDK (SDKMAN-style resolve → download → verify → extract)...");
     println!("Request: {}", request.label());
 
-    let installed_version = downloader::install_sdk(request).await?;
+    let installed_version = downloader::install_sdk(request, force).await?;
     setup::ensure_shims_exist()?;
 
     if get_default_version()?.is_none() {
@@ -29,7 +21,8 @@ pub async fn handle_install(
     }
 
     println!("Installed managed .NET SDK {installed_version}.");
-    println!("Run 'dver use {installed_version}' to create a local global.json.");
+    println!("Run 'dver use {installed_version}' for this directory (writes global.json).");
+    println!("Run 'dver use {installed_version} --global' to set the default (like sdk default).");
     println!("Run 'dver setup' once if you want dver to provide the active 'dotnet' command.");
 
     Ok(())
@@ -45,7 +38,7 @@ fn resolve_install_request(
             return Ok(InstallRequest::Version(normalized));
         }
 
-        return Ok(InstallRequest::Channel(value));
+        return Ok(InstallRequest::Channel(value.trim().to_string()));
     }
 
     if lts {

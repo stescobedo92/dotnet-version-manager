@@ -13,7 +13,7 @@ Instead of installing SDKs into the shared system dotnet location, `dver` keeps 
 - `dver setup` creates a `dotnet` shim and adds only the shim directory to `PATH`.
 - `dver use --global` now works like `nvm alias default`: it sets the default managed SDK instead of writing `~/global.json`.
 - Local `dver use <version>` still writes a project `global.json`.
-- `dver install` now uses the official `dotnet-install` script internally instead of manually downloading SDK archives.
+- `dver install` resolves versions from Microsoft release metadata, downloads the SDK archive, verifies the SHA-512 checksum, and extracts it into an isolated managed directory (SDKMAN-style).
 
 ## Why this is more reliable
 

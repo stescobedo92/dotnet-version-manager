@@ -58,6 +58,11 @@ pub fn list_managed_sdks() -> Result<Vec<ManagedSdk>, Box<dyn std::error::Error>
             continue;
         };
 
+        // Skip staging directories left by interrupted installs (SDKMAN-style tmp).
+        if name.starts_with('.') {
+            continue;
+        }
+
         if !managed_dotnet_path(&path).exists() {
             continue;
         }
@@ -103,7 +108,7 @@ fn resolve_managed_sdk_from_list(
 
     let matches: Vec<_> = sdks
         .iter()
-        .filter(|sdk| sdk.version.starts_with(selector))
+        .filter(|sdk| version_matches_selector(&sdk.version, selector))
         .cloned()
         .collect();
 
@@ -220,7 +225,10 @@ pub fn list_system_sdks() -> Result<Vec<SystemSdk>, Box<dyn std::error::Error>> 
         collect_sdks_from_directory(&sdk_dir, &mut discovered);
     }
 
-    let mut sdks = discovered.into_values().collect::<Vec<_>>();
+    let mut sdks = discovered
+        .into_values()
+        .filter(|sdk| !is_under_dver_root(&sdk.location))
+        .collect::<Vec<_>>();
     sdks.sort_by(|left, right| {
         compare_versions_desc(&left.version, &right.version)
             .then_with(|| left.location.cmp(&right.location))
@@ -228,8 +236,110 @@ pub fn list_system_sdks() -> Result<Vec<SystemSdk>, Box<dyn std::error::Error>> 
     Ok(sdks)
 }
 
+/// Locates a real system dotnet executable on PATH, skipping dver shims and
+/// other version-manager shim directories so listings never go through a proxy.
+pub fn find_system_dotnet_on_path() -> Option<PathBuf> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let shims_dir = crate::utils::common::get_shims_dir();
+    let binary = crate::utils::common::dotnet_binary_name();
+
+    for dir in path.split(crate::utils::platform::path_separator()) {
+        if dir.is_empty() {
+            continue;
+        }
+
+        let directory = PathBuf::from(dir);
+        if shims_dir.as_ref().is_some_and(|shim| shim == &directory) {
+            continue;
+        }
+
+        let lower = dir.to_ascii_lowercase();
+        if lower.contains(".dotver") || (lower.contains("dver") && lower.ends_with("bin")) {
+            continue;
+        }
+
+        let candidate = directory.join(binary);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Resolves a system-installed SDK by exact version or unique boundary prefix,
+/// using the same matching rules as managed SDK resolution.
+pub fn resolve_system_sdk(selector: &str) -> Result<SystemSdk, Box<dyn std::error::Error>> {
+    let selector = normalize_version_input(selector);
+    let sdks = list_system_sdks()?;
+
+    if let Some(exact) = sdks.iter().find(|sdk| sdk.version == selector) {
+        return Ok(exact.clone());
+    }
+
+    let matches: Vec<_> = sdks
+        .iter()
+        .filter(|sdk| version_matches_selector(&sdk.version, &selector))
+        .cloned()
+        .collect();
+
+    match matches.len() {
+        0 => Err(format!(
+            "No system-installed .NET SDK matches '{selector}'. Run 'dver list' to see what is installed."
+        )
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let versions = matches
+                .iter()
+                .map(|sdk| sdk.version.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "Version selector '{selector}' is ambiguous. Matching system versions: {versions}"
+            )
+            .into())
+        }
+    }
+}
+
+/// Returns versions installed both as dver-managed copies and system-wide.
+pub fn find_duplicated_versions() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let managed = list_managed_sdks()?
+        .into_iter()
+        .map(|sdk| sdk.version)
+        .collect::<std::collections::BTreeSet<_>>();
+    let system = list_system_sdks()?
+        .into_iter()
+        .map(|sdk| sdk.version)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    Ok(managed.intersection(&system).cloned().collect())
+}
+
+fn is_under_dver_root(location: &Path) -> bool {
+    let Some(root) = crate::utils::common::get_dver_root() else {
+        return false;
+    };
+
+    let location = location.to_string_lossy().to_ascii_lowercase();
+    let root = root.to_string_lossy().to_ascii_lowercase();
+    location.starts_with(&root)
+}
+
+fn version_matches_selector(version: &str, selector: &str) -> bool {
+    version == selector
+        || version.starts_with(&format!("{selector}."))
+        || version.starts_with(&format!("{selector}-"))
+}
+
 fn collect_sdks_from_dotnet_command(target: &mut BTreeMap<(String, PathBuf), SystemSdk>) {
-    let Ok(output) = Command::new("dotnet").arg("--list-sdks").output() else {
+    // Use a real system dotnet, never the shim, so managed SDKs are not
+    // reported back as "system" installations.
+    let Some(dotnet) = find_system_dotnet_on_path() else {
+        return;
+    };
+    let Ok(output) = Command::new(dotnet).arg("--list-sdks").output() else {
         return;
     };
     if !output.status.success() {
@@ -349,5 +459,12 @@ mod tests {
         let sdks = vec![sdk("8.0.406"), sdk("8.0.407")];
         let err = resolve_managed_sdk_from_list("8.0", &sdks).unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn rejects_partial_patch_prefix_without_boundary() {
+        let sdks = vec![sdk("8.0.406")];
+        let err = resolve_managed_sdk_from_list("8.0.40", &sdks).unwrap_err();
+        assert!(err.to_string().contains("not installed"));
     }
 }

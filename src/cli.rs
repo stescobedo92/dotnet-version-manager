@@ -13,6 +13,9 @@ pub enum Commands {
     Current,
     /// List managed SDK versions installed by dver
     List,
+    /// List .NET channels and latest SDKs available for install (like `sdk list`)
+    #[command(name = "list-remote", alias = "available")]
+    ListRemote,
     /// Select a managed SDK version
     Use {
         /// Managed SDK version to select
@@ -37,10 +40,13 @@ pub enum Commands {
         /// Install the latest LTS SDK
         #[arg(long)]
         lts: bool,
+        /// Install an isolated managed copy even if the version already exists system-wide
+        #[arg(long)]
+        force: bool,
     },
-    /// Uninstall a managed SDK version
+    /// Uninstall a managed or system SDK version
     Uninstall {
-        /// Managed SDK version to uninstall
+        /// SDK version to uninstall
         version: Option<String>,
         /// Backward-compatible alias for the positional version argument
         #[arg(long = "version", hide = true)]
@@ -48,6 +54,9 @@ pub enum Commands {
         /// Remove every managed SDK version and dver PATH configuration
         #[arg(long)]
         all: bool,
+        /// Target the system-wide installation instead of the dver-managed copy
+        #[arg(long)]
+        system: bool,
     },
     /// Diagnose PATH and SDK resolution issues
     Doctor,
