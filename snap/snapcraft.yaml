@@ -1,6 +1,8 @@
 name: dver
 base: core24
-version: "0.0.0"
+# Version is derived from Cargo.toml in the dver part's override-pull;
+# craftctl set version requires adopt-info.
+adopt-info: dver
 summary: dver manages .NET SDK versions with an nvm-like workflow.
 description: |
   dver is a cross-platform .NET SDK version manager inspired by nvm.
