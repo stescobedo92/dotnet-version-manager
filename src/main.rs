@@ -77,8 +77,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor => {
             commands::doctor::run_doctor_checks()?;
         }
-        Commands::Setup => {
-            commands::setup::move_to_top_of_path()?;
+        Commands::Setup { remove } => {
+            if *remove {
+                commands::setup::remove_setup()?;
+            } else {
+                commands::setup::move_to_top_of_path()?;
+            }
         }
     }
 

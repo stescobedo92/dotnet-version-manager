@@ -146,6 +146,86 @@ fn print_setup_report(shims_dir: &Path, report: &SetupReport) {
     }
 }
 
+pub fn remove_setup() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", setup_color("== dver setup --remove ==", SetupStyle::Title));
+    println!(
+        "{}",
+        setup_color(
+            "Undoing PATH entry, shell profile hook, and shim directory created by `dver setup`.",
+            SetupStyle::Dim
+        )
+    );
+    println!();
+
+    let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
+
+    remove_configuration()?;
+
+    let shims_removed = if shims_dir.exists() {
+        match fs::remove_dir_all(&shims_dir) {
+            Ok(()) => true,
+            Err(error) if is_locked_file_error(&error) => {
+                return Err(format!(
+                    "Could not remove shim directory {} because a file inside is locked \
+                     (often a 'dotnet' shim still in use by another shell). \
+                     Close any open terminals or processes using dver, then re-run \
+                     'dver setup --remove'. Underlying error: {error}",
+                    shims_dir.display()
+                )
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        false
+    };
+
+    println!(
+        "{} {}",
+        setup_color("[OK]", SetupStyle::Ok),
+        setup_color("Setup configuration removed", SetupStyle::Title)
+    );
+    println!(
+        "  {}",
+        setup_color(
+            format!(
+                "shim directory: {} ({})",
+                shims_dir.display(),
+                if shims_removed { "removed" } else { "not present" }
+            ),
+            SetupStyle::Info
+        )
+    );
+    println!(
+        "  {}",
+        setup_color(
+            "Managed SDKs and default-version selection were left untouched.",
+            SetupStyle::Dim
+        )
+    );
+    println!();
+    println!("{}", setup_color("Next steps", SetupStyle::Section));
+    if cfg!(windows) {
+        println!(
+            "  {}",
+            setup_color(
+                "Open a fresh PowerShell tab so the updated PATH and profile take effect.",
+                SetupStyle::Info
+            )
+        );
+    } else {
+        println!(
+            "  {}",
+            setup_color(
+                "Open a new terminal session so the updated shell profile is loaded.",
+                SetupStyle::Info
+            )
+        );
+    }
+
+    Ok(())
+}
+
 pub fn ensure_shims_exist() -> Result<(), Box<dyn std::error::Error>> {
     let shims_dir = get_shims_dir().ok_or("Could not determine dver shims directory")?;
     ensure_dir(&shims_dir)?;
@@ -372,13 +452,16 @@ pub fn windows_powershell_profile_paths() -> Vec<PathBuf> {
         let output = std::process::Command::new(shell)
             .arg("-NoProfile")
             .arg("-Command")
-            .arg("$PROFILE.CurrentUserCurrentHost")
+            .arg(
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+                 Write-Output $PROFILE.CurrentUserCurrentHost",
+            )
             .output();
 
         if let Ok(output) = output {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let profile = stdout.trim();
+                let profile = stdout.trim().trim_start_matches('\u{feff}');
                 if !profile.is_empty() {
                     let profile_path = PathBuf::from(profile);
                     if !profiles.iter().any(|existing| existing == &profile_path) {
@@ -617,6 +700,22 @@ fn remove_config_block(existing: &str) -> String {
     }
 
     result
+}
+
+fn is_locked_file_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED = 5, ERROR_SHARING_VIOLATION = 32, ERROR_LOCK_VIOLATION = 33
+        if let Some(code) = error.raw_os_error() {
+            return matches!(code, 5 | 32 | 33);
+        }
+    }
+
+    false
 }
 
 #[cfg(all(test, unix))]
